@@ -1,0 +1,36 @@
+version: '3'
+
+services:
+  ros-master:
+    image: ros:noetic-ros-core
+    container_name: ros-master
+    command: stdbuf -o L roscore
+    #ports:
+    #  - "11311:11311"
+    network_mode: host
+
+  hakuroukun-robot:
+    user: root
+    depends_on: 
+      - ros-master
+    image: hakuroukun_robot:latest
+    build:
+      context: ..
+      dockerfile: ./hakuroukun_dockerfiles/Dockerfile
+    container_name: hakuroukun-robot
+    volumes:
+      - "../:/root/catkin_ws/src/"
+      - "/tmp/.X11-unix:/tmp/.X11-unix:rw"
+      - "/tmp/.docker.xauth:/tmp/.docker.xauth"
+      - "/dev:/dev"
+    environment:
+      - "DISPLAY=$DISPLAY"
+      - "XAUTHORITY=/tmp/.docker.xauth"
+      - "QT_X11_NO_MITSHM=1"
+      - "GAZEBO_MODEL_PATH=/root/catkin_ws/src/hakuroukun_launch/models/:$GAZEBO_MODEL_PATH"
+    privileged: True
+    network_mode: host
+    entrypoint:
+      - tail
+      - -f
+      - /dev/null

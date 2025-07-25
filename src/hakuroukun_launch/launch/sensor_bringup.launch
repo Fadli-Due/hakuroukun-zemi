@@ -1,0 +1,31 @@
+<!-- This file is for experiment only -->
+<launch>
+
+    <!-- TSND IMU -->
+    <arg name="imu_state" default="true" />
+    <arg name="imu_serial_port" default="/dev/imu" />
+    <arg name="imu_publish_rate" default="100" />  <!-- Required : 100 -->
+ 
+    <!-- Ichimill GPS -->
+    <arg name="gps_state" default="true" />
+    <arg name="gps_serial_port" default="/dev/gps" />
+    <arg name="gps_baud" default="115200" /> 
+    <arg name="gps_debug" default="True" />
+
+    <group if="$(arg imu_state)">
+        <node pkg="tsnd151_imu" type="tsnd151_imu_node.py" name="tsnd151_imu_node" required="true">
+            <param name="serial_port" value="$(arg imu_serial_port)"/>
+            <param name="publish_rate" value="$(arg imu_publish_rate)"/>
+        </node>
+    </group>
+
+    <group if="$(arg gps_state)">
+        <node pkg="f9p_ichimill" type="f9p_driver.py" name="f9p_driver" args="">
+            <param name="port" value="$(arg gps_serial_port)"/>
+            <param name="baud" value="$(arg gps_baud)"/>
+            <param name="debug" value="$(arg gps_debug)"/>
+        </node>
+
+        <node pkg="nmea_navsat_driver" type="nmea_topic_driver" name="nmea_topic_driver" />
+    </group>
+</launch>
