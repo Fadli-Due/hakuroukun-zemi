@@ -13,7 +13,6 @@
 # Standard library
 import math
 import numpy as np
-import rospy
 
 
 class PurePursuit:
@@ -45,8 +44,6 @@ class PurePursuit:
         self._old_nearest_point_index = None
 
         self._previous_index = 0
-
-        self._is_reversing = False
 
     def update_trajectory(self, trajectory):
         """! Update the trajectory
@@ -95,29 +92,7 @@ class PurePursuit:
 
         alpha = math.atan2(math.sin(alpha), math.cos(alpha))
 
-       # v = 0.3 (INI DEFAULT SPEED)
-       
-       # Determine direction: forward vs reverse correction
-        angle_threshold = math.radians(80)  # Allow up to 120° deviation before reversing
-
-        if self._is_reversing:
-                # Obstacle cleared, go forward again
-            if abs(alpha) < angle_threshold:
-                self._is_reversing = False
-                rospy.loginfo("Reverse done. Resuming forward motion.")
-                v = 0.3
-            else:
-                # Keep reversing
-                v = -0.25
-                rospy.loginfo("Still reversing to avoid obstacle...")
-        else:
-            if abs(alpha) > angle_threshold and self._is_near_obstacle(state):
-                # Trigger reverse
-                self._is_reversing = True
-                rospy.loginfo("Reverse correction triggered due to obstacle.")
-                v = -0.25
-            else:
-                v = 0.3
+        v = 0.3
 
         delta = math.atan2(
             2.0 * PurePursuit.wheel_base * math.sin(alpha),
