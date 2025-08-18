@@ -12,7 +12,7 @@ class PurePursuitNode:
     def __init__(self):
         rospy.init_node('pure_pursuit_hakuroukun', anonymous=True)
 
-        # ========== Forward‑drive parameters ==========
+        # ========== Forward-drive parameters ==========
         pp_ns = "pure_pursuit_hakuroukun"
         self.MAX_SPEED        = rospy.get_param(f"{pp_ns}/max_speed", 0.6)
         self.MIN_SPEED        = rospy.get_param(f"{pp_ns}/min_speed", 0.4)
@@ -57,6 +57,10 @@ class PurePursuitNode:
 
         self.cmd_pub = rospy.Publisher('/cmd_controller', Float64MultiArray, queue_size=10)
 
+        # register shutdown once (not every loop)
+        rospy.on_shutdown(self.stop_robot)
+
+
     # ---------- Callbacks ----------
     def stop_cb(self, msg):  # external stop signal
         if msg.data:
@@ -87,17 +91,24 @@ class PurePursuitNode:
         self.path_available = bool(self.path_points)
 
     def scan_cb(self, msg):
-        angles = msg.angle_min + np.arange(len(msg.ranges)) * msg.angle_increment
+        #handling for weird scans (all inf/NaN or empty)
+        n = len(msg.ranges)
+        if n == 0:
+            self.min_front = float('inf')
+            return
+        angles = msg.angle_min + np.arange(n) * msg.angle_increment
         mask   = np.abs(angles) <= self.front_fov/2.0
-        rng    = np.asarray(msg.ranges)[mask]
-        rng    = rng[np.isfinite(rng)]
-        self.min_front = np.min(rng) if rng.size else float('inf')
+        if not np.any(mask):
+            self.min_front = float('inf')
+            return
+        rng = np.asarray(msg.ranges)[mask]
+        rng = rng[np.isfinite(rng)]
+        self.min_front = float(np.min(rng)) if rng.size else float('inf')
 
     # ---------- Main loop ----------
     def run(self):
         rate = rospy.Rate(self.ctrl_rate)
         while not rospy.is_shutdown():
-            rospy.on_shutdown(self.stop_robot)
             if self.current_pose and self.path_available:
                 v_fwd, steer_fwd = self.compute_pp()  # also updates self.last_alpha
                 now = time.time()
@@ -108,11 +119,15 @@ class PurePursuitNode:
                 # ----- FSM -----
                 if self.mode == "FORWARD":
                     if self.rev_enable and (self.min_front < self.front_stop or heading_bad or stuck):
+                        #reason logging
+                        reason = ("front" if self.min_front < self.front_stop
+                                  else "heading" if heading_bad
+                                  else "stuck")
                         self.mode = "REVERSE"
                         self.rev_start = now
-                        rospy.loginfo("MODE → REVERSE")
+                        rospy.loginfo(f"MODE → REVERSE ({reason})")
                 elif self.mode == "REVERSE":
-                    duration = now - self.rev_start
+                    duration = now - (self.rev_start if self.rev_start is not None else now)
                     if (self.min_front > self.front_clear and not heading_bad) or duration > self.rev_max_t:
                         self.mode = "FORWARD"
                         rospy.loginfo("MODE → FORWARD")
@@ -138,7 +153,7 @@ class PurePursuitNode:
     def stop_robot(self):
         self.publish_cmd(0.0, self.steering_cmd)
 
-    # ---- Pure‑Pursuit unchanged, but returns alpha ----
+    # ---- returns alpha ----
     def compute_pp(self):
         x, y, yaw = self.current_pose
         Lp = self.lookahead_point(x, y)
