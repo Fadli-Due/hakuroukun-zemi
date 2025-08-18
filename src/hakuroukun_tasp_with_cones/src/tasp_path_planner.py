@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import math
 import rospy
-import numpy
 
 class TASPPathPlanner:
     def __init__(self):
@@ -13,10 +12,12 @@ class TASPPathPlanner:
             threshold_distance (float): Threshold for removing points near the chosen goal from BTP (meters).
             sampling_resolution (float): Resolution for checking area occupancy (meters).
         """
-        self.tasp_cell_size = rospy.get_param("tasp_cell_size", 1)
+        # keep one source of truth for cell size (float)
+        self.tasp_cell_size = rospy.get_param("tasp_cell_size", 1.0)
         self.sampling_resolution = rospy.get_param("sampling_resolution", 0.1)
         self.remove_btp_threshold_distance = rospy.get_param("remove_btp_threshold_distance", 0.1)
-        self.max_allowed_distance = rospy.get_param("range_max", 6)
+        self.max_allowed_distance = rospy.get_param("range_max", 6.0)
+        self.inflated_tasp_cell = rospy.get_param("inflated_tasp_cell", 3.0)
 
         # BackTracking Points
         self.BTP = []
@@ -24,8 +25,6 @@ class TASPPathPlanner:
         self.TASPtrajectory = []
         self.goto_closest_BTP = False
         self.is_initial_position = True
-        self.tasp_cell_size = rospy.get_param("tasp_cell_size", 1.0)
-        self.inflated_tasp_cell = rospy.get_param("inflated_tasp_cell", 3.0)
 
     def tasp_path_planning(self, current_pose, costmap, start_pose):
         """
@@ -143,29 +142,16 @@ class TASPPathPlanner:
     def find_front_cell_with_min_rotation(self, free_cells, front_cell, current_pose):
         """
         Find the front cell from free_cells that requires minimal rotation from the robot's current orientation.
-
-        Args:
-            free_cells (list): List of free cells ([x, y]) to consider.
-            front_cell (list): The initially computed front cell ([x, y]).
-            current_pose (tuple): Current robot pose (x, y, theta).
-
-        Returns:
-            list: The front cell that minimizes the robot's rotation.
         """
         current_x, current_y, current_theta = current_pose
         min_rotation = float('inf')
         best_cell = None
 
         for cell in free_cells:
-            # Compute the angle to the cell
             dx = cell[0] - current_x
             dy = cell[1] - current_y
             angle_to_cell = math.atan2(dy, dx)
-
-            # Calculate the angular difference
             angular_diff = abs(self.normalize_angle(angle_to_cell - current_theta))
-
-            # Find the cell with the smallest rotation
             if angular_diff < min_rotation:
                 min_rotation = angular_diff
                 best_cell = cell
@@ -176,12 +162,6 @@ class TASPPathPlanner:
     def normalize_angle(self, angle):
         """
         Normalize an angle to the range [-pi, pi].
-
-        Args:
-            angle (float): Angle in radians.
-
-        Returns:
-            float: Normalized angle in radians.
         """
         while angle > math.pi:
             angle -= 2 * math.pi
@@ -190,7 +170,7 @@ class TASPPathPlanner:
         return angle
 
     def is_area_free(self, center_cell, costmap):
-        half_size = self.inflated_tasp_cell*self.tasp_cell_size / 2.0
+        half_size = self.inflated_tasp_cell * self.tasp_cell_size / 2.0
         x_min = center_cell[0] - half_size
         x_max = center_cell[0] + half_size
         y_min = center_cell[1] - half_size
@@ -206,13 +186,12 @@ class TASPPathPlanner:
                     return False
         return True
 
-
     def update_BTP(self, free_cells):
         """
         Append free cells to BTP if they aren’t already there.
         """
         for cell in free_cells:
-            if self.is_initial_position and cell == [-1, 0]: # Avoid cell behind robot to be BTP
+            if self.is_initial_position and cell == [-1, 0]:  # Avoid cell behind robot to be BTP
                 self.is_initial_position = False
                 continue
             if not self.list_has_row(self.BTP, cell):
