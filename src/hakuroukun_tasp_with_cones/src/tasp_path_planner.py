@@ -19,14 +19,6 @@ class TASPPathPlanner:
         self.max_allowed_distance = rospy.get_param("range_max", 6.0)
         self.inflated_tasp_cell = rospy.get_param("inflated_tasp_cell", 3.0)
 
-        # --- Dynamic cell size params ---
-        self.min_tasp_cell_size   = rospy.get_param("min_tasp_cell_size", 0.6)
-        self.max_tasp_cell_size   = rospy.get_param("max_tasp_cell_size", 1.0)
-        self.narrow_clearance_m   = rospy.get_param("narrow_clearance_m", 1.2)
-        self.wide_clearance_m     = rospy.get_param("wide_clearance_m", 2.0)
-        self.cellsize_hyst_m      = rospy.get_param("cellsize_hysteresis_m", 0.3)
-        self._last_cell_size = self.tasp_cell_size 
-
         # BackTracking Points
         self.BTP = []
         # TASP trajectory (a list of [x, y] waypoints)
@@ -54,19 +46,6 @@ class TASPPathPlanner:
 
         TASPcurrentPos = self.TASPtrajectory[-1]
         TASPprevPos = self.TASPtrajectory[-2]
-
-        # --- Dynamic cell size selection based on local clearance (with hysteresis) ---
-        clearance = self.get_local_clearance(TASPcurrentPos, costmap)
-        new_size = self._last_cell_size
-        if clearance <= (self.narrow_clearance_m - self.cellsize_hyst_m):
-            new_size = self.min_tasp_cell_size
-        elif clearance >= (self.wide_clearance_m + self.cellsize_hyst_m):
-            new_size = self.max_tasp_cell_size
-        # else keep previous
-        if abs(new_size - self._last_cell_size) > 1e-9:
-            print(f"[TASP] clearance={clearance:.2f} m -> cell_size={new_size:.2f} m")
-        self.tasp_cell_size = new_size
-        self._last_cell_size = new_size
 
         front_cell = self.get_front_cell(TASPcurrentPos, TASPprevPos)
         free_cells = self.get_free_cells(TASPcurrentPos, costmap, self.TASPtrajectory)
@@ -220,7 +199,7 @@ class TASPPathPlanner:
 
     def find_closest_BTP(self, current_pos, BTP, start_pose):
         """
-        For each point in BTP, pick the closest.
+        For each point in BTP, pick the closest (Euclidean). 
         If tie => pick one that is farthest from start_pose.
         """
         if not BTP:
@@ -277,35 +256,6 @@ class TASPPathPlanner:
                 break
 
         return distance
-    
-        def get_local_clearance(self, position_xy, costmap):
-            """
-            Estimate local clearance (meters) around 'position_xy' by ray sampling.
-            Returns the minimum distance to an occupied cell over several bearings.
-            """
-        px, py = position_xy[0], position_xy[1]
-        bearings = [0.0, math.pi/4, math.pi/2, 3*math.pi/4,
-                    math.pi, -3*math.pi/4, -math.pi/2, -math.pi/4]
-
-        max_probe = max(self.wide_clearance_m * 1.5, 3.0)
-        step = max(0.2, self.min_tasp_cell_size / 2.0)
-
-        min_hit = max_probe
-        for th in bearings:
-            dist = 0.0
-            cx, cy = px, py
-            ux, uy = math.cos(th), math.sin(th)
-            while dist <= max_probe:
-                cx += ux * step
-                cy += uy * step
-                occ = self.get_occupancy_value(costmap, cx, cy)
-                if occ == 100:
-                    break
-                dist += step
-            if dist < min_hit:
-                min_hit = dist
-
-        return min_hit
 
     # --------------------------------------------------------------------------
     # UTILITY / STUB FUNCTIONS
