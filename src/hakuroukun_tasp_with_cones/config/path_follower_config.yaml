@@ -12,11 +12,11 @@ reverse:
   max_duration: 2.0      # seconds (safety cap)
   #front_stop_range: 0.8  
   #front_clear_range: 1.2 
-  front_stop_range: 0.9  # m (enter reverse if obstacle closer)
-  front_clear_range: 1.3 # m (leave reverse when clear)
+  front_stop_range: 1.2  # m (enter reverse if obstacle closer)
+  front_clear_range: 1.4 # m (leave reverse when clear)
   front_fov_deg: 90      # degrees used for min range check
-  angle_threshold_deg: 100
-  stuck_time: 1.5        # seconds window for progress check
+  angle_threshold_deg: 80
+  stuck_time: 1.0        # seconds window for progress check
   progress_min: 0.05     # meters progress required to avoid "stuck"
 
 

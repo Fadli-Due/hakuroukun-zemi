@@ -1,33 +1,50 @@
-start_pose: [0, 0, 0]  # [x, y, theta]
-camera_fov: 90         # Degrees
-camera_range: 6        # Meters
-map_resolution: 0.05   # Meters per cell
-map_width: 4000        # Number of cells
-map_height: 4000       # Number of cells
-map_origin: [-100, -100]  # [x, y]
+# --- Map & robot basics ---
+start_pose: [0.0, 0.0, 0.0]        # [x, y, theta]
+camera_fov: 90                      # deg (for viz only)
+camera_range: 6.0                   # m   (for viz only)
+map_resolution: 0.05                # m/cell
+map_width: 4000
+map_height: 4000
+map_origin: [-100, -100]
 
-# TASP cell size (initial); planner now switches dynamically each cycle
-tasp_cell_size: 0.6
+# --- TASP core ---
+tasp_cell_size: 0.6                 # initial cell size (planner can change this)
+inflated_tasp_cell: 2.0             # footprint multiplier used by is_area_free
+tasp_goal_tolerance: 1.5            # m
+wait_duration: 10.0                 # s
+sampling_resolution: 0.10           # m for area sampling
 
-# Inflate TASP free-area check (square side = inflated_tasp_cell * tasp_cell_size)
-inflated_tasp_cell: 2
+# --- Planner robustness (matches tasp_path_planner.py) ---
+use_eight_connected: true           # allow diagonal escapes
+unknown_is_blocked: false           # let planner step into unknown
+max_footprint_radius_m: 0.6         # cap on square half-size in is_area_free
+blocked_threshold: 80               # >= this value = blocked
+relax_shrink_factor: 0.7            # extra shrink when planner relaxes checks
 
-tasp_goal_tolerance: 1.5   # Meters
-wait_duration: 10.0        # Seconds to allow for map updates
-rate_hz: 2                 # Main loop rate
+# --- Dynamic cell size (optional; ON recommended) ---
+enable_dynamic_cell_size: true
+base_cell_size_m: 0.6
+min_cell_size_m: 0.5
+max_cell_size_m: 1.0
+narrow_clearance_m: 1.2
+wide_clearance_m: 2.0
+cellsize_hysteresis_m: 0.3
+clearance_scan_radius_m: 2.5
+dynamic_cell_min_dwell_s: 5.0       # hold size at least this long
+dynamic_cell_replan_cooldown_s: 3.0
+publish_debug_topics: true
+sampling_resolution_factor: 0.25     # sampling_resolution = max(map_res, factor * cell_size)
 
-# Parameters for TASPPathPlanner
-remove_btp_threshold_distance: 0.1  # Threshold for removing points near the chosen goal from BTP
-sampling_resolution: 0.1            # Sampling resolution for checking area occupancy
+# --- Main loop behavior (main.py) ---
+rate_hz: 5
+pause_on_cell_change: true
+cell_change_delta_m: 0.15
+cell_change_pause_s: 0.8
+skip_goal_on_plan_fail: true
+max_plan_failures: 2
+halt_on_plan_fail: false             # don't hard-stop follower on A* hiccups
 
-# --- Dynamic cell size (NEW) ---
-min_tasp_cell_size: 0.6          # use in narrow areas
-max_tasp_cell_size: 1.0          # use in open areas
-narrow_clearance_m: 1.2          # <= (this - hysteresis) => min size
-wide_clearance_m: 2.0            # >= (this + hysteresis) => max size
-cellsize_hysteresis_m: 0.3       # buffer to avoid flapping
-
-# Parameters for cone zone creator
+# --- Cone zone creator (keep your existing values if customized) ---
 circular_region_radius: 5.5
 duplicate_threshold: 2
 sliding_window: 90
