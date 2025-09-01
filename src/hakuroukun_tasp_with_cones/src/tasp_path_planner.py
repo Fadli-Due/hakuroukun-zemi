@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import math
 import rospy
+from std_msgs.msg import Float32
 
 class TASPPathPlanner:
     def __init__(self):
@@ -19,8 +20,30 @@ class TASPPathPlanner:
         self.max_allowed_distance = rospy.get_param("range_max", 6.0)
         self.inflated_tasp_cell = rospy.get_param("inflated_tasp_cell", 3.0)
 
+        # --- Dynamic cell size params (all optional; default keeps legacy behavior) ---
+        self.enable_dynamic_cell_size = rospy.get_param("enable_dynamic_cell_size", False)
+        self.base_cell_size       = rospy.get_param("base_cell_size_m", self.tasp_cell_size)
+        self.min_cell_size        = rospy.get_param("min_cell_size_m", max(0.2, self.tasp_cell_size))
+        self.max_cell_size        = rospy.get_param("max_cell_size_m", max(self.min_cell_size, self.tasp_cell_size))
+        self.narrow_clearance     = rospy.get_param("narrow_clearance_m", 1.2)
+        self.wide_clearance       = rospy.get_param("wide_clearance_m", 2.0)
+        self.cellsize_hyst        = rospy.get_param("cellsize_hysteresis_m", 0.2)
+        self.clearance_radius     = rospy.get_param("clearance_scan_radius_m", 2.5)
+        self.min_dwell_s          = rospy.get_param("dynamic_cell_min_dwell_s", 5.0)
+        self.cooldown_s           = rospy.get_param("dynamic_cell_replan_cooldown_s", 3.0)
+        self.publish_debug        = rospy.get_param("publish_debug_topics", True)
+        self.sampling_res_factor  = rospy.get_param("sampling_resolution_factor", None)  # e.g., 0.2
+
+        # State for dynamic sizing
+        self._last_cell_size = float(self.tasp_cell_size)
+        self._last_size_change_time = rospy.Time.now()
+        if self.publish_debug:
+            self._dbg_clearance_pub = rospy.Publisher("/tasp/debug/clearance", Float32, queue_size=1)
+            self._dbg_cell_size_pub = rospy.Publisher("/tasp/debug/cell_size", Float32, queue_size=1)
+
         # BackTracking Points
         self.BTP = []
+
         # TASP trajectory (a list of [x, y] waypoints)
         self.TASPtrajectory = []
         self.goto_closest_BTP = False
@@ -38,6 +61,10 @@ class TASPPathPlanner:
         Returns:
             TASPgoal (list [x, y]) or None if no goal is available
         """
+        # --- Dynamic cell size update (before neighbor expansion) ---
+        if self.enable_dynamic_cell_size:
+            self._maybe_update_cell_size(current_pose, costmap)
+
         if len(self.TASPtrajectory) < 2:
             self.TASPtrajectory = [
                 [current_pose[0], current_pose[1]],
@@ -98,6 +125,74 @@ class TASPPathPlanner:
 
         return self.TASPtrajectory[-1]
     
+    # --------------------------------------------------------------------------
+    # DYNAMIC CELL SIZE (clearance, hysteresis, dwell/cooldown)
+    # --------------------------------------------------------------------------
+    def _maybe_update_cell_size(self, current_pose, costmap):
+        """Decide and (if allowed) apply a new tasp_cell_size based on local clearance."""
+        # 1) measure clearance
+        clearance = self._get_local_clearance(current_pose, costmap, self.clearance_radius)
+        if self.publish_debug:
+            self._dbg_clearance_pub.publish(Float32(clearance))
+
+        # 2) pick target bin with hysteresis
+        target = self._pick_cell_size(clearance, self._last_cell_size)
+
+        # 3) dwell + cooldown gates
+        now = rospy.Time.now()
+        elapsed = (now - self._last_size_change_time).to_sec()
+        if target != self._last_cell_size and elapsed >= self.min_dwell_s and elapsed >= self.cooldown_s:
+            # apply the change
+            self._last_cell_size = float(target)
+            self.tasp_cell_size = float(target)
+            # optionally scale sampling resolution with size (clamped to map resolution)
+            if self.sampling_res_factor is not None and hasattr(costmap.info, "resolution"):
+                self.sampling_resolution = max(costmap.info.resolution, self.sampling_res_factor * self.tasp_cell_size)
+            self._last_size_change_time = now
+            if self.publish_debug:
+                self._dbg_cell_size_pub.publish(Float32(self.tasp_cell_size))
+        elif self.publish_debug:
+            # Even if size doesn’t change, keep emitting current size for plotting
+            self._dbg_cell_size_pub.publish(Float32(self.tasp_cell_size))
+
+    def _pick_cell_size(self, clearance, last_size):
+        """Hysteresis: narrow if <= (narrow−hyst); wide if >= (wide+hyst); else stick to last/base."""
+        # Default to last -> avoids thrashing inside band
+        target = last_size if last_size is not None else self.base_cell_size
+        if clearance <= (self.narrow_clearance - self.cellsize_hyst):
+            target = self.min_cell_size
+        elif clearance >= (self.wide_clearance + self.cellsize_hyst):
+            target = self.max_cell_size
+        return float(target)
+
+    def _get_local_clearance(self, current_pose, costmap, max_radius):
+        """
+        Radially expand from the robot, stopping at the first occupied/unknown hit.
+        Returns max free radius (meters). Unknown (>=50) is treated as boundary.
+        """
+        cx, cy, _ = current_pose
+        # Use existing sampling_resolution; ensure reasonable step sizes
+        step_r = max(0.05, self.sampling_resolution)
+        step_ang = math.radians(10.0)  # 36 rays per ring
+        r = 0.0
+        last_free_r = 0.0
+        while r <= max_radius + 1e-6:
+            blocked = False
+            a = 0.0
+            while a < 2.0 * math.pi:
+                x = cx + r * math.cos(a)
+                y = cy + r * math.sin(a)
+                if self.get_occupancy_value(costmap, x, y) >= 50:
+                    blocked = True
+                    break
+                a += step_ang
+            if blocked:
+                # first ring that collides → clearance is previous radius
+                return max(0.0, r - step_r)
+            last_free_r = r
+            r += step_r
+        return min(last_free_r, max_radius)
+        
     # --------------------------------------------------------------------------
     # HELPER FUNCTIONS
     # --------------------------------------------------------------------------
