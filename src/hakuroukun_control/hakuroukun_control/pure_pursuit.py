@@ -148,3 +148,5 @@ class PurePursuit:
         x = distance[:, 0] if distance.ndim == 2 else distance[0]
         y = distance[:, 1] if distance.ndim == 2 else distance[1]
         return np.hypot(x, y)
+
+

@@ -141,3 +141,4 @@ if __name__ == '__main__':
     # Subscribe to odometry to get the robot's pose in the map frame
     rospy.Subscriber('/hakuroukun_pose/rear_wheel_odometry', Odometry, simulate_cone_detection)
     rospy.spin()
+
