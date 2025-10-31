@@ -10,143 +10,111 @@
 #
 # Copyright (c) 2024 System Engineering Laboratory.  All rights reserved.
 
-# Standard library
+#!/usr/bin/env python3
 import math
 import numpy as np
 
-
 class PurePursuit:
-    """! Pure Pursuit controller
-
-    The class provides implementation of pure pursuit controller for
-    autonomous driving.
+    """
+    Lightweight Pure Pursuit controller for (N,2) numpy trajectory arrays.
+    State = [x, y, yaw]. Returns [v, delta], [tx, ty].
     """
 
-    lookahead_distance = 1.35
-    lookahead_gain = 0.1
-    k = 1
-    wheel_base = 1.0
+    def __init__(self, trajectory_xy: np.ndarray,
+                 wheel_base: float = 1.0,
+                 min_speed: float = 0.15,
+                 max_speed: float = 0.60,
+                 lookahead_min: float = 0.60,
+                 lookahead_max: float = 1.20,
+                 kappa_max: float = 2.0,
+                 max_steer: float = 0.78,     # ~45 deg
+                 max_accel: float = 1.0):     # m/s^2 (for limiter)
+        assert trajectory_xy.ndim == 2 and trajectory_xy.shape[1] == 2, \
+            "trajectory_xy must be (N,2) array of xy points"
+        self.traj = trajectory_xy
+        self.wheel_base = wheel_base
 
-    # ==================================================================================================
-    # PUBLIC METHODS
-    # ==================================================================================================
-    def __init__(self, trajectory):
-        """! Constructor
-        @param trajectory<instance>: The trajectory
+        self.MIN_SPEED = min_speed
+        self.MAX_SPEED = max_speed
+        self.lookahead_min = lookahead_min
+        self.lookahead_max = lookahead_max
+        self.kappa_max = kappa_max
+        self.MAX_STEER = max_steer
+        self.MAX_ACCEL = max_accel
+
+        self.prev_v = 0.0
+        self.last_idx = 0    # nearest point index cache
+
+    # ---- public -------------------------------------------------------------
+    def execute(self, state, dt: float = 0.1):
         """
-        self.trajectory = trajectory
-        self.lookahead_point = [0.0, 0.0]
-        self._old_nearest_point_index = None
-        self._previous_index = 0
-
-    def update_trajectory(self, trajectory):
-        """! Update the trajectory
-        @param trajectory<instance>: The trajectory
+        state: [x, y, yaw]
+        dt   : controller period (s) for accel limiting
         """
-        self.trajectory = trajectory
+        idx, Ld = self._search_target_index(state)
+        tx, ty = self.traj[idx]
 
-    def execute(self, state, u, previous_index):
-        """! Execute the controller
-        @param state<list>: The state of the vehicle
-        @param u<list>: The input of the vehicle (unused here)
-        @param previous_index<int>: The previous index
-        @return<tuple>: The status and control
-        """
-        status = True
-
-        if self._is_goal(state, self.trajectory):
-            return False, [0, 0]
-
-        index, lookahead_distance = self._search_target_index(state, u)
-
-        if self._previous_index >= index:
-            index = self._previous_index
-
-        if index < len(self.trajectory.x):
-            trajectory_x = self.trajectory.x[index, 0]
-            trajectory_y = self.trajectory.x[index, 1]
-        else:
-            trajectory_x = self.trajectory.x[-1, 0]
-            trajectory_y = self.trajectory.x[-1, 1]
-            index = len(self.trajectory.x) - 1
-
-        self._previous_index = index
-
-        alpha = math.atan2(
-            trajectory_y - state[1],
-            trajectory_x - state[0],
-        ) - state[2]
+        # heading to target in vehicle frame
+        alpha = math.atan2(ty - state[1], tx - state[0]) - state[2]
         alpha = math.atan2(math.sin(alpha), math.cos(alpha))
 
-        v = 0.3
+        # curvature & speed profile
+        kappa = abs(2.0 * math.sin(alpha) / max(Ld, 1e-3))
+        curv_factor = max(0.0, 1.0 - kappa / self.kappa_max)
+        v_des = self.MIN_SPEED + (self.MAX_SPEED - self.MIN_SPEED) * curv_factor
 
-        delta = math.atan2(
-            2.0 * PurePursuit.wheel_base * math.sin(alpha),
-            lookahead_distance
-        )
+        # acceleration limiter
+        dv_max = self.MAX_ACCEL * max(dt, 1e-3)
+        v = self.prev_v + np.clip(v_des - self.prev_v, -dv_max, dv_max)
+        self.prev_v = v
 
-        self.lookahead_point = [trajectory_x, trajectory_y]
+        # pure pursuit steering with steer clamp
+        delta = math.atan2(2.0 * self.wheel_base * math.sin(alpha), Ld)
+        delta = float(np.clip(delta, -self.MAX_STEER, self.MAX_STEER))
 
-        return status, [v, delta]
+        return [v, delta], [tx, ty]
 
-    # ==================================================================================================
-    # PRIVATE METHODS
-    # ==================================================================================================
-    def _search_target_index(self, state, u):
-        """! Search the target index
-        @param state<list>: The state of the vehicle
-        @param u<list>: The input of the vehicle (unused)
-        @return<int>: The index
-        @return<float>: The lookahead distance
+    # ---- private ------------------------------------------------------------
+    def _search_target_index(self, state):
         """
-        if self._old_nearest_point_index is None:
-            all_distance = self._calculate_distance(self.trajectory.x, state)
-            index = np.argmin(all_distance)
-        else:
-            index = self._old_nearest_point_index
-            this_distance = self._calculate_distance(self.trajectory.x[index], state)
-
-            # advance while next point is closer (guard bounds first)
-            while (index + 1) < len(self.trajectory.x):
-                next_distance = self._calculate_distance(self.trajectory.x[index + 1], state)
-                if this_distance < next_distance:
-                    break
-                index += 1
-                this_distance = next_distance
-
-        self._old_nearest_point_index = index
-
-        lookahead_distance = PurePursuit.lookahead_distance
-        distance = self._calculate_distance(self.trajectory.x[index], state)
-
-        while lookahead_distance > distance:
-            if (index + 1) >= len(self.trajectory.x):
+        Returns (index, lookahead_distance). Uses adaptive lookahead based on current speed.
+        """
+        # nearest point (advance from last_idx)
+        idx = self.last_idx
+        # ensure idx in bounds
+        idx = max(0, min(idx, len(self.traj) - 1))
+        # move forward while next is closer
+        cur_d = self._dist_point_state(self.traj[idx], state)
+        while (idx + 1) < len(self.traj):
+            nxt_d = self._dist_point_state(self.traj[idx + 1], state)
+            if cur_d < nxt_d:
                 break
-            index += 1
-            distance = self._calculate_distance(self.trajectory.x[index], state)
+            idx += 1
+            cur_d = nxt_d
+        self.last_idx = idx
 
-        return index, lookahead_distance
+        # adaptive lookahead (linear with current speed estimate)
+        v_norm = (self.prev_v - self.MIN_SPEED) / (self.MAX_SPEED - self.MIN_SPEED + 1e-6)
+        v_norm = max(0.0, min(1.0, v_norm))
+        Ld = self.lookahead_min + (self.lookahead_max - self.lookahead_min) * v_norm
 
-    # ==================================================================================================
-    # STATIC METHODS
-    # ==================================================================================================
+        # step forward until distance >= Ld
+        d = self._dist_point_state(self.traj[idx], state)
+        while d < Ld and (idx + 1) < len(self.traj):
+            idx += 1
+            d = self._dist_point_state(self.traj[idx], state)
+
+        return idx, max(Ld, 1e-3)
+
+    # ---- helpers ------------------------------------------------------------
     @staticmethod
-    def _is_goal(state, trajectory):
-        """! Check if the vehicle has reached the goal
-        @param state<list>: The state of the vehicle
-        @param trajectory<instance>: The trajectory
-        @return<bool>: The flag to indicate if the vehicle has reached the goal
-        """
-        delta_x = trajectory.x[-1, 0] - state[0]
-        delta_y = trajectory.x[-1, 1] - state[1]
-        distance = np.hypot(delta_x, delta_y)
-        return distance < 1.0
+    def _dist_point_state(pt, state):
+        dx = float(pt[0]) - float(state[0])
+        dy = float(pt[1]) - float(state[1])
+        return math.hypot(dx, dy)
 
     @staticmethod
-    def _calculate_distance(reference_x, current_x):
-        distance = current_x - reference_x
-        x = distance[:, 0] if distance.ndim == 2 else distance[0]
-        y = distance[:, 1] if distance.ndim == 2 else distance[1]
-        return np.hypot(x, y)
-
-
+    def is_goal(state, traj_xy: np.ndarray, tol: float = 1.0) -> bool:
+        dx = float(traj_xy[-1, 0]) - float(state[0])
+        dy = float(traj_xy[-1, 1]) - float(state[1])
+        return math.hypot(dx, dy) < tol
