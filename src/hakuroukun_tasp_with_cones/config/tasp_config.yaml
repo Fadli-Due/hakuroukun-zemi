@@ -6,14 +6,14 @@ map_width: 4000          # Number of cells
 map_height: 4000         # Number of cells
 map_origin: [-100, -100]   # [x, y]
 #tasp_cell_size: 1        # Size of TASP planning cells
-tasp_cell_size: 0.6    # New size of TASP planning cells
-inflated_tasp_cell: 2    # inflate TASP cell x times
+tasp_cell_size: 0.5    # New size of TASP planning cells
+inflated_tasp_cell: 3    # inflate TASP cell x times
 tasp_goal_tolerance: 1.5 # Meters
 wait_duration: 10.0       # Seconds to allow for map updates
 rate_hz: 2               # Main loop rate
 
 # Parameters for TASPPathPlanner
-remove_btp_threshold_distance: 0.1 # Threshold for removing points near the chosen goal from BTP
+remove_btp_threshold_distance: 0.5 # Threshold for removing points near the chosen goal from BTP
 sampling_resolution: 0.1     # Sampling resolution for checking area occupancy
 
 # Parameters for cone zone creator
@@ -22,4 +22,14 @@ duplicate_threshold: 2
 sliding_window: 90
 batch: 60
 
+pattern:
+  mode: lanes_then_edges           # switch to edges_then_lanes for perimeter-first
+  heading_keep_window_deg: 20.0
 
+weights:
+  length: 1.2
+  heading: 0.9
+  lane_change: 1.1
+  clearance: 0.5
+  edge: 0.0                        # set ~0.6 when edges_then_lanes
+  edge_distance_target: 0.35
