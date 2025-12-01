@@ -37,6 +37,7 @@ class TASPPathPlanner:
         self.w_clearance   = rospy.get_param("weights/clearance", 0.5)     # prefer more free space
         self.w_edge        = rospy.get_param("weights/edge", 0.6)          # only used if edges-first
         self.edge_dist_m   = rospy.get_param("weights/edge_distance_target", 0.35)  # ideal offset from walls (m)
+        self.w_inward = params.get("w_inward", 0.8)
 
 
     def tasp_path_planning(self, current_pose, costmap, start_pose):
@@ -335,6 +336,19 @@ class TASPPathPlanner:
             fwdx, fwdy, fwdL = 1.0, 0.0, 1.0
         ux_fwd, uy_fwd = fwdx / fwdL, fwdy / fwdL
 
+        # ---------- coverage centroid + average radius (for inward term) ----------
+        inward_term_available = False
+        if len(self.TASPtrajectory) >= 10:  # need enough points to be meaningful
+            sx = sum(p[0] for p in self.TASPtrajectory)
+            sy = sum(p[1] for p in self.TASPtrajectory)
+            cx = sx / len(self.TASPtrajectory)
+            cy = sy / len(self.TASPtrajectory)
+
+            radii = [math.hypot(p[0] - cx, p[1] - cy) for p in self.TASPtrajectory]
+            avg_r = sum(radii) / len(radii) if radii else 0.0
+            inward_term_available = avg_r > 0.0
+        # -------------------------------------------------------------------------
+
         for c in free_cells:
             # 1) Heading to candidate
             dx, dy = c[0] - TASPcurrentPos[0], c[1] - TASPcurrentPos[1]
@@ -367,10 +381,10 @@ class TASPPathPlanner:
             dot = ux_fwd * vecx + uy_fwd * vecy
 
             if len(self.TASPtrajectory) <= 3 and dot < 0:
-                score = -1e9  # effectively "not allowed" at startup
+                base_score = -1e9  # effectively "not allowed" at startup
             else:
             # Final score: higher is better
-                score = (
+                base_score = (
                     self.w_length * straight_len
                     - self.w_heading * heading_keep_pen
                     - self.w_lane_change * lane_change
@@ -378,10 +392,27 @@ class TASPPathPlanner:
                     + self.w_edge * edge_bonus
                 )
 
+            # 6) Inward preference term
+            inward_bonus = 0.0
+            if inward_term_available:
+                r_cand = math.hypot(c[0] - cx, c[1] - cy)
+                # positive if moving inward (r smaller than avg_r), negative if outward
+                inward_delta = (avg_r - r_cand)
+                inward_bonus = self.w_inward * inward_delta
+                score = base_score + inward_bonus
+            else:
+                score = base_score
+
             dbg[tuple(c)] = {"len": straight_len, "dtheta": dtheta, "lane_change": lane_change,
-                            "clear": clearance, "edge_bonus": edge_bonus, "score": score}
-            if score > best_score:
-                best_score, best_cell = score, c
+                            "clear": clearance, "edge_bonus": edge_bonus, "score": score, 
+                            "inward": inward_bonus if inward_term_available else 0.0,}
+
+        # ---------- selection (same as before: best score wins) ----------
+        best_cell, best_score = None, -1e18
+        for cell, info in dbg.items():
+            if info["score"] > best_score:
+                best_score = info["score"]
+                best_cell = cell
 
         return best_cell, dbg
 

@@ -25,7 +25,7 @@ from scipy.spatial.transform import Rotation
 
 # Internal libraries
 from hakuroukun_control.feed_forward import FeedForward
-from hakuroukun_control.pure_pursuit import PurePursuit
+from hakuroukun_control.hakuroukun_control.pure_pursuit_experiment import PurePursuit
 from hakuroukun_control.dynamic_window_approach import DynamicWindowApproach
 
 

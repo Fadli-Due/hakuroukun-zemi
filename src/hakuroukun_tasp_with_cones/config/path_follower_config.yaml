@@ -20,6 +20,3 @@ reverse:
   angle_threshold_deg: 110
   stuck_time: 1.5        # seconds window for progress check
   progress_min: 0.05     # meters progress required to avoid "stuck"
-
-
-
