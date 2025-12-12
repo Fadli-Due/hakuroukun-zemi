@@ -165,5 +165,3 @@ if __name__ == "__main__":
         vis.publish_astar_path(current_path)
 
         rate.sleep()
-
-        

@@ -14,14 +14,14 @@ class PurePursuitNode:
 
         # ========== Forward-drive parameters ==========
         pp_ns = "pure_pursuit_hakuroukun"
-        self.MAX_SPEED        = rospy.get_param(f"{pp_ns}/max_speed", 0.45)
-        self.MIN_SPEED        = rospy.get_param(f"{pp_ns}/min_speed", 0.2)
+        self.MAX_SPEED        = rospy.get_param(f"{pp_ns}/max_speed", 0.6)
+        self.MIN_SPEED        = rospy.get_param(f"{pp_ns}/min_speed", 0.4)
         self.MAX_ACCEL        = rospy.get_param("/hakuroukun_steering_controller/linear/x/max_acceleration", 2.5)
         self.MAX_STEERING     = rospy.get_param("/hakuroukun_steering_controller/angular/z/max_position", 0.78)
         self.MIN_STEERING     = rospy.get_param("/hakuroukun_steering_controller/angular/z/min_position", -0.78)
         #self.lookahead_dist   = rospy.get_param(f"{pp_ns}/lookahead_distance", 0.8)
         self.lookahead_min = rospy.get_param(f"{pp_ns}/lookahead_min", 0.6)
-        self.lookahead_max = rospy.get_param(f"{pp_ns}/lookahead_max", 1.4)
+        self.lookahead_max = rospy.get_param(f"{pp_ns}/lookahead_max", 1.2)
         self.wheelbase        = rospy.get_param(f"{pp_ns}/wheelbase", 1.1)
         self.ctrl_rate        = rospy.get_param(f"{pp_ns}/control_rate", 10)
         self.rev_L            = rospy.get_param("reverse/lookahead_distance", 0.6)
@@ -34,7 +34,7 @@ class PurePursuitNode:
         self.rev_max_t    = rp.get("max_duration", 2.0)
         self.front_stop   = rp.get("front_stop_range", 0.7)
         self.front_clear  = rp.get("front_clear_range", 1.2)
-        self.front_fov    = math.radians(rp.get("front_fov_deg", 75))
+        self.front_fov    = math.radians(rp.get("front_fov_deg", 70))
         self.ang_thresh   = math.radians(rp.get("angle_threshold_deg", 110))
         self.stuck_time   = rp.get("stuck_time", 1.5)
         self.progress_min = rp.get("progress_min", 0.05)
@@ -234,5 +234,3 @@ class PurePursuitNode:
 
 if __name__ == '__main__':
     PurePursuitNode().run()
-
-    
