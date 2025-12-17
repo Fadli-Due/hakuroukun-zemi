@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import math, collections
+import math, time, collections
 import numpy as np
 import rospy
 from nav_msgs.msg import Odometry, Path
@@ -19,23 +19,19 @@ class PurePursuitNode:
         self.MAX_ACCEL        = rospy.get_param("/hakuroukun_steering_controller/linear/x/max_acceleration", 2.5)
         self.MAX_STEERING     = rospy.get_param("/hakuroukun_steering_controller/angular/z/max_position", 0.78)
         self.MIN_STEERING     = rospy.get_param("/hakuroukun_steering_controller/angular/z/min_position", -0.78)
-        #self.lookahead_dist   = rospy.get_param(f"{pp_ns}/lookahead_distance", 0.8)
-        self.lookahead_min = rospy.get_param(f"{pp_ns}/lookahead_min", 0.6)
-        self.lookahead_max = rospy.get_param(f"{pp_ns}/lookahead_max", 1.2)
+        self.lookahead_dist   = rospy.get_param(f"{pp_ns}/lookahead_distance", 0.8)
         self.wheelbase        = rospy.get_param(f"{pp_ns}/wheelbase", 1.1)
         self.ctrl_rate        = rospy.get_param(f"{pp_ns}/control_rate", 10)
-        self.rev_L            = rospy.get_param("reverse/lookahead_distance", 0.6)
-        self.kappa_max        = rospy.get_param(f"{pp_ns}/kappa_max", 2.0)
 
         # ========== Reverse parameters ==========
         rp = rospy.get_param("reverse", {})
         self.rev_enable   = rp.get("enable", True)
         self.rev_speed    = abs(rp.get("speed", 0.25))          # magnitude
         self.rev_max_t    = rp.get("max_duration", 2.0)
-        self.front_stop   = rp.get("front_stop_range", 0.7)
+        self.front_stop   = rp.get("front_stop_range", 0.8)
         self.front_clear  = rp.get("front_clear_range", 1.2)
-        self.front_fov    = math.radians(rp.get("front_fov_deg", 70))
-        self.ang_thresh   = math.radians(rp.get("angle_threshold_deg", 110))
+        self.front_fov    = math.radians(rp.get("front_fov_deg", 90))
+        self.ang_thresh   = math.radians(rp.get("angle_threshold_deg", 100))
         self.stuck_time   = rp.get("stuck_time", 1.5)
         self.progress_min = rp.get("progress_min", 0.05)
 
@@ -63,6 +59,7 @@ class PurePursuitNode:
 
         # register shutdown once (not every loop)
         rospy.on_shutdown(self.stop_robot)
+
 
     # ---------- Callbacks ----------
     def stop_cb(self, msg):  # external stop signal
@@ -114,7 +111,7 @@ class PurePursuitNode:
         while not rospy.is_shutdown():
             if self.current_pose and self.path_available:
                 v_fwd, steer_fwd = self.compute_pp()  # also updates self.last_alpha
-                now = rospy.Time.now().to_sec()
+                now = time.time()
                 moved = sum(d for _, d in self.prog_hist)
                 stuck = moved < self.progress_min
                 heading_bad = abs(self.last_alpha) > self.ang_thresh
@@ -133,24 +130,14 @@ class PurePursuitNode:
                     duration = now - (self.rev_start if self.rev_start is not None else now)
                     if (self.min_front > self.front_clear and not heading_bad) or duration > self.rev_max_t:
                         self.mode = "FORWARD"
-                        self.rev_resume = rospy.Time.now().to_sec()  # start brief pause window
                         rospy.loginfo("MODE → FORWARD")
-                    
-                # ----- Command selection ----- 
+
+                # ----- Command selection -----
                 if self.mode == "REVERSE":
                     v = -self.rev_speed
                     steer = self.reverse_steering()
                 else:
                     v, steer = v_fwd, steer_fwd
-
-                if getattr(self, 'rev_resume', 0):
-                    if rospy.Time.now().to_sec() - self.rev_resume < 0.3:
-                        v = 0.0
-
-                max_dsteer = 0.35 / self.ctrl_rate   # ~0.35 rad/s; tune
-                dsteer = steer - self.steering_cmd
-                if dsteer >  max_dsteer: steer = self.steering_cmd + max_dsteer
-                if dsteer < -max_dsteer: steer = self.steering_cmd - max_dsteer
 
                 self.publish_cmd(v, steer)
             rate.sleep()
@@ -164,21 +151,13 @@ class PurePursuitNode:
         self.cmd_pub.publish(msg)
 
     def stop_robot(self):
-        self.publish_cmd(0.0, 0.0)
-
-    def adaptive_lookahead(self, speed):
-        Lmin, Lmax = self.lookahead_min, self.lookahead_max
-        v_norm = (speed - self.MIN_SPEED) / (self.MAX_SPEED - self.MIN_SPEED + 1e-6)
-        v_norm = max(0.0, min(1.0, v_norm))
-        return Lmin + (Lmax - Lmin) * v_norm
+        self.publish_cmd(0.0, self.steering_cmd)
 
     # ---- returns alpha ----
     def compute_pp(self):
         x, y, yaw = self.current_pose
-        lookahead = self.adaptive_lookahead(self.previous_speed)
-        Lp = self.lookahead_point(x, y, lookahead_dist=lookahead)
+        Lp = self.lookahead_point(x, y)
         if Lp is None:
-            self.last_alpha = 0.0  # avoid stale heading triggering reverse
             return (0.0, 0.0)
 
         dx, dy = Lp[0] - x, Lp[1] - y
@@ -189,20 +168,14 @@ class PurePursuitNode:
         if abs(alpha) > math.pi/2:
             steering = math.copysign(self.MAX_STEERING, alpha)
         else:
-            steering = math.atan2(2.0 * self.wheelbase * math.sin(alpha), lookahead)
+            steering = math.atan2(2.0 * self.wheelbase * math.sin(alpha), self.lookahead_dist)
         steering = max(self.MIN_STEERING, min(self.MAX_STEERING, steering))
 
-        # curvature estimate (avoid div-by-zero)
-        kappa = abs(2.0 * math.sin(alpha) / max(lookahead, 1e-3))
-        kappa_max = self.kappa_max
-        curv_factor = max(0.0, 1.0 - kappa / kappa_max)
-        desired_speed = self.MIN_SPEED + (self.MAX_SPEED - self.MIN_SPEED) * curv_factor
+        curvature_penalty = max(0.2, 1 - abs(steering) / self.MAX_STEERING)
+        desired_speed = (self.MAX_SPEED - self.MIN_SPEED) * curvature_penalty + self.MIN_SPEED
 
         dt = 1.0 / self.ctrl_rate
         max_dv = self.MAX_ACCEL * dt
-        # optional jerk limiter
-        jerk_limit = 1.0     # m/s^3
-        max_dv = min(max_dv, jerk_limit * dt)
         speed_diff = desired_speed - self.previous_speed
         speed_diff = max(-max_dv, min(max_dv, speed_diff))
         new_speed = self.previous_speed + speed_diff
@@ -210,27 +183,23 @@ class PurePursuitNode:
 
         return new_speed, steering
 
-    def lookahead_point(self, rx, ry, lookahead_dist=None):
-        L = lookahead_dist if lookahead_dist is not None else self.lookahead_dist
+    def lookahead_point(self, rx, ry):
         for px, py in self.path_points:
-            if math.hypot(px - rx, py - ry) >= L:
+            if math.hypot(px - rx, py - ry) >= self.lookahead_dist:
                 return (px, py)
         return None
 
     # ---- Steering while reversing ----
     def reverse_steering(self):
         x, y, yaw = self.current_pose
-
-        Lp = self.lookahead_point(x, y, lookahead_dist=self.rev_L)
+        Lp = self.lookahead_point(x, y)
         if Lp is None:
             return 0.0
         dx, dy = Lp[0] - x, Lp[1] - y
         alpha_rev = math.atan2(dy, dx) - (yaw + math.pi)
         alpha_rev = math.atan2(math.sin(alpha_rev), math.cos(alpha_rev))
-
-        steer = math.atan2(2.0 * self.wheelbase * math.sin(alpha_rev), self.rev_L)
-        steer = max(self.MIN_STEERING, min(self.MAX_STEERING, steer))
-        return steer
+        steer = math.atan2(2.0 * self.wheelbase * math.sin(alpha_rev), self.lookahead_dist)
+        return max(self.MIN_STEERING, min(self.MAX_STEERING, steer))
 
 if __name__ == '__main__':
     PurePursuitNode().run()
