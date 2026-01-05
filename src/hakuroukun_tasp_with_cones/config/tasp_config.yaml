@@ -6,9 +6,9 @@ map_width: 4000          # Number of cells
 map_height: 4000         # Number of cells
 map_origin: [-100, -100]   # [x, y]
 #tasp_cell_size: 1        # Size of TASP planning cells
-tasp_cell_size: 0.6    # New size of TASP planning cells
+tasp_cell_size: 0.7  # New size of TASP planning cells
 inflated_tasp_cell: 2    # inflate TASP cell x times
-tasp_goal_tolerance: 1.5 # Meters
+tasp_goal_tolerance: 1.0 # Meters
 wait_duration: 10.0       # Seconds to allow for map updates
 rate_hz: 2               # Main loop rate
 
