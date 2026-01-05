@@ -13,11 +13,11 @@ class TASPPathPlanner:
             sampling_resolution (float): Resolution for checking area occupancy (meters).
         """
         # keep one source of truth for cell size (float)
-        self.tasp_cell_size = rospy.get_param("tasp_cell_size", 1.0)
+        self.tasp_cell_size = rospy.get_param("tasp_cell_size", 0.7)
         self.sampling_resolution = rospy.get_param("sampling_resolution", 0.1)
         self.remove_btp_threshold_distance = rospy.get_param("remove_btp_threshold_distance", 0.1)
         self.max_allowed_distance = rospy.get_param("range_max", 6.0)
-        self.inflated_tasp_cell = rospy.get_param("inflated_tasp_cell", 3.0)
+        self.inflated_tasp_cell = rospy.get_param("inflated_tasp_cell", 2)
 
         # BackTracking Points
         self.BTP = []

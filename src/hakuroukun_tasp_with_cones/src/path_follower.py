@@ -14,12 +14,12 @@ class PurePursuitNode:
 
         # ========== Forward-drive parameters ==========
         pp_ns = "pure_pursuit_hakuroukun"
-        self.MAX_SPEED        = rospy.get_param(f"{pp_ns}/max_speed", 0.6)
-        self.MIN_SPEED        = rospy.get_param(f"{pp_ns}/min_speed", 0.4)
+        self.MAX_SPEED        = rospy.get_param(f"{pp_ns}/max_speed", 0.4)
+        self.MIN_SPEED        = rospy.get_param(f"{pp_ns}/min_speed", 0.25)
         self.MAX_ACCEL        = rospy.get_param("/hakuroukun_steering_controller/linear/x/max_acceleration", 2.5)
         self.MAX_STEERING     = rospy.get_param("/hakuroukun_steering_controller/angular/z/max_position", 0.78)
         self.MIN_STEERING     = rospy.get_param("/hakuroukun_steering_controller/angular/z/min_position", -0.78)
-        self.lookahead_dist   = rospy.get_param(f"{pp_ns}/lookahead_distance", 0.8)
+        self.lookahead_dist   = rospy.get_param(f"{pp_ns}/lookahead_distance", 0.6)
         self.wheelbase        = rospy.get_param(f"{pp_ns}/wheelbase", 1.1)
         self.ctrl_rate        = rospy.get_param(f"{pp_ns}/control_rate", 10)
 
