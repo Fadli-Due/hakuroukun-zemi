@@ -1,0 +1,31 @@
+<launch>
+    <!-- Arguments -->
+    <arg name="open_rviz" default="true"/>
+    <!-- MAKE SURE THIS PATH IS CORRECT FOR YOUR SYSTEM -->
+    <arg name="map_file" default="$(find hakuroukun_tasp_with_cones)/maps/saved_map.yaml"/>
+
+    <!-- Load Parameters -->
+    <rosparam file="$(find hakuroukun_tasp_with_cones)/config/tasp_config.yaml" command="load" />
+    <rosparam file="$(find hakuroukun_tasp_with_cones)/config/path_follower_config.yaml" command="load" />
+
+    <!-- Map Server -->
+    <node pkg="map_server" type="map_server" name="map_server" args="$(arg map_file)" output="screen"/>
+
+    <!-- Static Transform Publisher (Links map -> odom) 
+         Args: x y z yaw pitch roll parent_frame child_frame period_ms -->
+    <node pkg="tf" type="static_transform_publisher" name="map_odom_broadcaster" args="0 0 0 0 0 0 map odom 100" />
+
+    <!-- Offline Boustrophedon Planner -->
+    <node pkg="hakuroukun_tasp_with_cones" type="offline_coverage_planner.py" name="offline_coverage_planner" output="screen" />
+
+    <!-- Path Follower -->
+    <node pkg="hakuroukun_tasp_with_cones" type="path_follower.py" name="path_follower" output="screen">
+        <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+    </node>
+
+    <!-- Rviz -->
+    <group if="$(arg open_rviz)"> 
+        <node pkg="rviz" type="rviz" name="rviz" required="true"
+              args="-d $(find hakuroukun_tasp_with_cones)/rviz/tasp_with_cones.rviz"/>
+    </group>
+</launch>
