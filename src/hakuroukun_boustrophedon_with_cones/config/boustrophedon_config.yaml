@@ -1,0 +1,26 @@
+start_pose: [0, 0, 0]  # [x, y, theta]
+camera_fov: 90           # Degrees
+camera_range: 6          # Meters
+map_resolution: 0.05     # Meters per cell
+map_width: 4000          # Number of cells
+map_height: 4000         # Number of cells
+map_origin: [-100, -100]   # [x, y]
+#tasp_cell_size: 1        # Size of TASP planning cells
+tasp_cell_size: 0.7  # New size of TASP planning cells
+inflation_radius_m: 0.8
+astar_connectivity: 4
+wp_min_spacing: 0.7
+inflated_tasp_cell: 2    # inflate TASP cell x times
+tasp_goal_tolerance: 1.3 # Meters
+wait_duration: 10.0       # Seconds to allow for map updates
+rate_hz: 2               # Main loop rate
+
+# Parameters for TASPPathPlanner
+remove_btp_threshold_distance: 0.1 # Threshold for removing points near the chosen goal from BTP
+sampling_resolution: 0.1     # Sampling resolution for checking area occupancy
+
+# Parameters for cone zone creator
+circular_region_radius: 5.5
+duplicate_threshold: 2
+sliding_window: 90
+batch: 60
