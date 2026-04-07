@@ -11,7 +11,7 @@ inflation_radius_m: 0.8
 astar_connectivity: 4
 wp_min_spacing: 0.7
 inflated_tasp_cell: 2    # inflate TASP cell x times
-tasp_goal_tolerance: 1.3 # Meters
+tasp_goal_tolerance: 0.4 # Meters
 wait_duration: 10.0       # Seconds to allow for map updates
 rate_hz: 2               # Main loop rate
 

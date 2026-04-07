@@ -70,7 +70,32 @@ class TASPPathPlanner:
                 self.goto_closest_BTP = False
                 self.TASPtrajectory.append(cell)
             elif self.list_has_row(free_cells, front_cell):
-                self.TASPtrajectory.append(front_cell)
+                front_clearance = self.get_distance_to_obstacle(TASPcurrentPos, front_cell, costmap)
+
+                # only keep pushing forward if there is enough space ahead
+                if front_clearance >= (1.5 * self.tasp_cell_size):
+                    self.TASPtrajectory.append(front_cell)
+                else:
+                    # choose a side cell instead of forcing one more step toward the wall
+                    best_cell = None
+                    best_score = -1.0
+
+                    for cell in free_cells:
+                        if cell == front_cell:
+                            continue
+
+                        clearance = self.get_distance_to_obstacle(TASPcurrentPos, cell, costmap)
+                        away_bonus = 1.0 if self.is_away_from_start(cell, start_pose, TASPcurrentPos) else 0.0
+                        score = clearance + away_bonus
+
+                        if score > best_score:
+                            best_score = score
+                            best_cell = cell
+
+                    if best_cell is not None:
+                        self.TASPtrajectory.append(best_cell)
+                    else:
+                        self.TASPtrajectory.append(front_cell)
             elif len(free_cells) == 2:
                 cell1 = free_cells[0]
                 cell2 = free_cells[1]
@@ -247,7 +272,7 @@ class TASPPathPlanner:
             next_x = current_x + ux * self.tasp_cell_size
             next_y = current_y + uy * self.tasp_cell_size
             occ_val = self.get_occupancy_value(costmap, next_x, next_y)
-            if occ_val == 100:
+            if occ_val >= 50:
                 break
             distance += self.tasp_cell_size
             current_x, current_y = next_x, next_y

@@ -261,6 +261,7 @@ class PurePursuitNode:
             return (0.0, 0.0)
 
         Lp = self.lookahead_point(x, y, yaw)
+        rospy.loginfo_throttle(0.5, f"[pp-debug] pose=({x:.2f},{y:.2f},{yaw:.2f}) Lp={Lp} closest_i={self.closest_i}")
         if Lp is None:
             fb = min(self.closest_i + 10, len(self.path_points) - 1)
             Lp = self.path_points[fb]
@@ -297,9 +298,9 @@ class PurePursuitNode:
         def to_robot(dx, dy, yaw):
             c = math.cos(-yaw)
             s = math.sin(-yaw)
-            return (c*dx - s*dy, s*dx + c*dy)
+            return (c * dx - s * dy, s * dx + c * dy)
 
-        # --- search only forward from cursor to avoid lane switching ---
+        # search only forward from current cursor
         start = max(0, self.closest_i)
         end = min(len(self.path_points), start + self.max_search_ahead)
 
@@ -307,14 +308,14 @@ class PurePursuitNode:
         best_d2 = float('inf')
         for i in range(start, end):
             px, py = self.path_points[i]
-            d2 = (px - rx)**2 + (py - ry)**2
+            d2 = (px - rx) ** 2 + (py - ry) ** 2
             if d2 < best_d2:
                 best_d2 = d2
                 best_i = i
 
         self.closest_i = best_i
 
-        # --- walk forward by arc length until lookahead distance ---
+        # walk forward along path until lookahead distance is reached
         dist_acc = 0.0
         lastx, lasty = self.path_points[best_i]
 
@@ -326,20 +327,19 @@ class PurePursuitNode:
             if dist_acc >= self.lookahead_dist:
                 dx, dy = x - rx, y - ry
                 xr, _ = to_robot(dx, dy, yaw)
-                if xr > 0.0:     # slightly softer than 0.10
+                if xr > 0.0:
                     return (x, y)
 
-            # fallback: pick a future point that is not (too) behind in robot frame
-            for k in (10, 20, 30, 40, 60, 80):
-                fb = min(best_i + k, len(self.path_points) - 1)
-                xfb, yfb = self.path_points[fb]
-                dx, dy = xfb - rx, yfb - ry
-                xr, _ = to_robot(dx, dy, yaw)
-                if xr > -0.05:   # allow slightly behind, but avoid "go backwards" targets
-                    return (xfb, yfb)
+        # fallback moved OUTSIDE the loop
+        for k in (10, 20, 30, 40, 60, 80):
+            fb = min(best_i + k, len(self.path_points) - 1)
+            xfb, yfb = self.path_points[fb]
+            dx, dy = xfb - rx, yfb - ry
+            xr, _ = to_robot(dx, dy, yaw)
+            if xr > -0.05:
+                return (xfb, yfb)
 
-            # last resort: just head to final point
-            return self.path_points[-1]
+        return self.path_points[-1]
 
 
     # ---- Steering while reversing ----
