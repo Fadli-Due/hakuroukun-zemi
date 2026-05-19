@@ -1,32 +1,31 @@
-start_pose: [0, 0, 0]
-camera_fov: 90
-camera_range: 6
-map_resolution: 0.05
-map_width: 4000
-map_height: 4000
-map_origin: [-100, -100]
+# =============================================================================
+#  boustrophedon_config.yaml
+#  Parameters for the offline BCD coverage planner (offline_coverage_planner.py).
+#  Loaded globally by offline_path_planning.launch.
+# =============================================================================
 
-tasp_cell_size: 0.7
-inflation_radius_m: 0.6
-astar_connectivity: 8
-wp_min_spacing: 0.7
-inflated_tasp_cell: 1.8
-tasp_goal_tolerance: 1.3
-wait_duration: 10.0
-rate_hz: 2
+# --- robot footprint / clearance --------------------------------------------
+# Single inflation distance (m): keeps the robot CENTRE this far from walls.
+# This is the ONLY clearance applied (no double counting). Roughly:
+#   robot_radius ~= half robot width + small safety margin.
+# Raise it if the robot clips walls; lower it (toward ~0.45) to recover
+# coverage in tight regions.
+robot_radius: 0.55
 
-remove_btp_threshold_distance: 0.1
-sampling_resolution: 0.1
+# --- coverage pattern --------------------------------------------------------
+# Distance between adjacent sweep lanes (m). Set equal to the cleaning width
+# for edge-to-edge coverage. Smaller -> more overlap, higher coverage, slower.
+lane_spacing: 1.0
 
-# for offline boustrophedon planner
-use_turn_trim: true
-turn_margin_cells: 1
-densify_step: 0.25
-enable_smoothing: false
-smoothing_iterations: 1
-corner_lookahead_pts: 2
+# Trim each lane end by this much (m) to leave room for the 180-deg turn.
+# BCD lane ends sit on obstacle boundaries, so trimming costs little real
+# coverage. Increase if the robot struggles to turn at lane ends.
+turn_margin: 0.30
 
-circular_region_radius: 5.5
-duplicate_threshold: 2
-sliding_window: 90
-batch: 60
+# Cells smaller than this (m^2) are discarded as inflation slivers.
+min_cell_area: 2.0
+
+# --- path shaping ------------------------------------------------------------
+astar_connectivity: 8       # 8 = allow diagonal transit moves, 4 = orthogonal
+densify_step: 0.20          # spacing (m) of points emitted along the path
+crop_margin: 1.0            # extra margin (m) kept around the known map region
