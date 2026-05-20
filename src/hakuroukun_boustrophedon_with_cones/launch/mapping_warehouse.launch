@@ -1,0 +1,35 @@
+<launch>
+    <!--
+        Mapping launch for the warehouse Gazebo sim.
+        Goal: rebuild warehouse_map.pgm cleanly so walls align with Gazebo,
+              and so the 14 construction cones are baked into the static map.
+
+        Run AFTER bringup_hakuroukun_warehouse_sim.launch is already running.
+        Use a 3rd terminal for sim_teleop_key.py to drive the robot manually.
+
+        When mapping looks complete, save with:
+          rosrun map_server map_saver -f $(rospack find hakuroukun_boustrophedon_with_cones)/maps/warehouse_map
+    -->
+
+    <arg name="open_rviz" default="true"/>
+
+    <!-- Load gmapping params under the slam_gmapping namespace.
+         IMPORTANT: this yaml MUST have tf_broadcast: true so gmapping
+         publishes the map->odom transform. -->
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/gmapping_params.yaml"
+              command="load" />
+
+    <!-- SLAM gmapping.
+         The merged lidar topic from the bringup is /scan_multi, but slam_gmapping
+         subscribes to /scan by default. We remap. The scan_topic param in the
+         yaml is informational only; this remap is what actually matters. -->
+    <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen" required="true">
+        <remap from="scan" to="/scan_multi"/>
+    </node>
+
+    <!-- RViz for watching the map build. -->
+    <group if="$(arg open_rviz)">
+        <node pkg="rviz" type="rviz" name="rviz_mapping" required="false"
+              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/mapping.rviz"/>
+    </group>
+</launch>
