@@ -1,0 +1,76 @@
+<launch>
+    <!-- Arguments -->
+    <arg name="open_rviz" default="true"/>
+    <arg name="use_static_map" default="true"/>
+    <arg name="map_file" default="$(find hakuroukun_boustrophedon_with_cones)/maps/warehouse_map.yaml"/>
+
+    <!-- Load Parameters -->
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/boustrophedon_config.yaml" command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/path_follower_config.yaml" command="load" />
+
+    <!-- Map Server -->
+    <group if="$(arg use_static_map)">
+      <node pkg="map_server" type="map_server" name="map_server" args="$(arg map_file)" />
+    </group>
+
+    <!-- AMCL Localization (Replaces static map_odom_broadcaster) -->
+    <group if="$(arg use_static_map)">
+      <node pkg="amcl" type="amcl" name="amcl" output="screen">
+        <!-- Frame configurations -->
+        <param name="odom_frame_id" value="odom"/>
+        <param name="base_frame_id" value="base_link"/>
+        <param name="global_frame_id" value="map"/>
+        <param name="use_map_topic" value="true"/>
+
+        <!-- Scan topic to listen to -->
+        <remap from="scan" to="/scan_multi"/>
+
+        <!-- Initial Pose (matches Gazebo spawn position) -->
+        <param name="initial_pose_x" value="0.0"/>
+        <param name="initial_pose_y" value="0.0"/>
+        <param name="initial_pose_a" value="0.0"/>
+
+        <!-- Performance / Filter Tuning -->
+        <param name="min_particles" value="500"/>
+        <param name="max_particles" value="2000"/>
+        <param name="kld_err" value="0.05"/>
+        <param name="update_min_d" value="0.1"/> <!-- Update every 10cm -->
+        <param name="update_min_a" value="0.1"/> <!-- Update every ~5.7 degrees -->
+        <param name="resample_interval" value="1"/>
+        <param name="transform_tolerance" value="0.5"/>
+        <param name="gui_publish_rate" value="10.0"/>
+
+        <!-- Laser Model Parameters -->
+        <param name="laser_max_beams" value="60"/>
+        <param name="laser_z_hit" value="0.5"/>
+        <param name="laser_z_short" value="0.05"/>
+        <param name="laser_z_max" value="0.05"/>
+        <param name="laser_z_rand" value="0.5"/>
+        <param name="laser_sigma_hit" value="0.2"/>
+        <param name="laser_lambda_short" value="0.1"/>
+        <param name="laser_model_type" value="likelihood_field"/>
+        <param name="laser_likelihood_max_dist" value="2.0"/>
+
+        <!-- Odometry Model (Hakuroukun uses diff-steering equivalent) -->
+        <param name="odom_model_type" value="diff"/>
+        <param name="odom_alpha1" value="0.2"/>
+        <param name="odom_alpha2" value="0.2"/>
+        <param name="odom_alpha3" value="0.2"/>
+        <param name="odom_alpha4" value="0.2"/>
+      </node>
+    </group>
+
+    <!-- Offline Boustrophedon Planner -->
+    <node pkg="hakuroukun_boustrophedon_with_cones" type="offline_coverage_planner.py" name="offline_coverage_planner" output="screen" />
+
+    <!-- Path Follower -->
+    <node pkg="hakuroukun_boustrophedon_with_cones" type="path_follower.py" name="path_follower" output="screen">
+        <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+    </node>
+
+    <!-- Rviz -->
+    <group if="$(arg open_rviz)"> 
+        <node pkg="rviz" type="rviz" name="rviz" required="true"
+              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/boustrophedon_with_cones.rviz"/>
+    </group>
+</launch>

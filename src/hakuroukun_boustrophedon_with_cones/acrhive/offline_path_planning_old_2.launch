@@ -1,0 +1,60 @@
+<launch>
+    <!-- Arguments -->
+    <arg name="open_rviz"       default="true"/>
+    <arg name="use_static_map"  default="true"/>
+    <arg name="map_file"        default="$(find hakuroukun_boustrophedon_with_cones)/maps/warehouse_map.yaml"/>
+
+    <!-- Load planner + follower params -->
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/boustrophedon_config.yaml" command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/path_follower_config.yaml" command="load" />
+
+    <!-- Map Server: publishes /map (OccupancyGrid, latched) -->
+    <group if="$(arg use_static_map)">
+        <node pkg="map_server" type="map_server" name="map_server" args="$(arg map_file)" />
+    </group>
+
+    <!--
+        AMCL: replaces the old static_transform_publisher for map->odom.
+
+        Previously: map->odom was a fixed identity (args="0 0 0 0 0 0 map odom 100").
+        Problem:    wheel-slip in sim accumulates odom drift.  Because map==odom
+                    the path_follower targets drifted odom positions, not true world
+                    positions, causing the robot to steer into walls.
+
+        Fix:        AMCL continuously matches /scan_multi to /map and publishes
+                    a corrected map->odom transform.  Both the BCD planner and
+                    path_follower already do TF lookups on this chain, so they
+                    automatically get the corrected pose — no code changes needed.
+
+        Requires:   odom->base_link TF must exist (published by the Gazebo
+                    hakuroukun_steering_controller or the odom_tf_broadcaster node).
+                    Verify with: rosrun tf view_frames
+    -->
+    <node pkg="amcl" type="amcl" name="amcl" output="screen" required="true">
+        <!-- Load AMCL params into this node's private namespace -->
+        <rosparam command="load"
+                  file="$(find hakuroukun_boustrophedon_with_cones)/config/amcl_params.yaml"/>
+        <!-- Merged lidar is on /scan_multi; AMCL default is /scan -->
+        <remap from="scan" to="/scan_multi"/>
+    </node>
+
+    <!-- Offline Boustrophedon Planner (unchanged) -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="offline_coverage_planner.py"
+          name="offline_coverage_planner"
+          output="screen" />
+
+    <!-- Path Follower (unchanged) -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="path_follower.py"
+          name="path_follower"
+          output="screen">
+        <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+    </node>
+
+    <!-- RViz -->
+    <group if="$(arg open_rviz)">
+        <node pkg="rviz" type="rviz" name="rviz" required="true"
+              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/boustrophedon_with_cones.rviz"/>
+    </group>
+</launch>
