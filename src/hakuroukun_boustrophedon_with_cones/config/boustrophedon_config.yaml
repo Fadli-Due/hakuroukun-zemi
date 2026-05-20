@@ -10,7 +10,7 @@
 #   robot_radius ~= half robot width + small safety margin.
 # Raise it if the robot clips walls; lower it (toward ~0.45) to recover
 # coverage in tight regions.
-robot_radius: 0.55
+robot_radius: 0.75
 
 # --- coverage pattern --------------------------------------------------------
 # Distance between adjacent sweep lanes (m). Set equal to the cleaning width

@@ -1,6 +1,6 @@
-image: warehouse_map.pgm
+image: /root/catkin_ws/src/hakuroukun_boustrophedon_with_cones/maps/warehouse_map.pgm
 resolution: 0.050000
-origin: [-100.000000, -100.000000, 0.000000]
+origin: [-25.000000, -25.000000, 0.000000]
 negate: 0
 occupied_thresh: 0.65
 free_thresh: 0.196

@@ -1,46 +1,56 @@
 slam_gmapping:
-  # Frames
-  base_frame: "base_link"    # The frame attached to the robot base
-  odom_frame: "odom"         # The frame representing the odometry
-  map_frame: "map"           # The frame representing the map.
-  tf_broadcast: false
-  
-  # Topics
-  scan_topic: "/scan_multi"  # Topic where LIDAR data is published
+  # ---- Frames ----
+  base_frame: "base_link"
+  odom_frame: "odom"
+  map_frame:  "map"
 
-  # Map settings
-  maxUrange: 20.0             # Maximum range of the LIDAR (meters)
-  maxRange: 21.0              # Maximum usable range of the LIDAR (meters)
-  minimumScore: 10          # Minimum score for scan matching
-  # delta: 0.05                # Map resolution (meters per grid cell)
+  # IMPORTANT: must be true when running standalone SLAM so gmapping
+  # publishes the map -> odom transform itself. If you ever switch to
+  # amcl-based localization on a pre-built map, set this back to false
+  # in that workflow. For RE-MAPPING this MUST stay true.
+  tf_broadcast: true
 
-  # Map update thresholds
-  linearUpdate: 0.5          # Minimum linear movement before updating the map (meters)
-  angularUpdate: 0.2         # Minimum angular movement before updating the map (radians)
-  mapUpdateInterval: 1     # Time interval to update the map (seconds)
+  # ---- Topic (informational; the launch file does the actual remap) ----
+  scan_topic: "/scan_multi"
 
-  # Motion model (odometry-based localization noise parameters)
-  srr: 0.00                  # Odometry error in translation from translation
-  srt: 0.00                  # Odometry error in rotation from translation
-  str: 0.00                  # Odometry error in translation from rotation
-  stt: 0.00                  # Odometry error in rotation from rotation
+  # ---- LiDAR range ----
+  # Match the laserscan_multi_merger range in the bringup. The merger
+  # already enforces range_min: 1.0 and range_max: 25.0 on /scan_multi,
+  # so anything tighter than that is fine.
+  maxUrange: 20.0          # max range used for scan matching (m)
+  maxRange:  21.0          # max range used for map update (m)
+  minimumScore: 50         # raised a bit; sim odom is clean so we can be strict
 
-  # Particle filter settings
-  particles: 50             # Number of particles used in the particle filter
-  # llsamplerange: 0.1         # Initial sampling range for the particle filter (linear)
-  # llsamplestep: 0.05         # Step size for linear sampling
-  # lasamplerange: 0.2         # Initial sampling range for the particle filter (angular)
-  # lasamplestep: 0.05         # Step size for angular sampling
+  # ---- Map resolution ----
+  # 5 cm per cell. Same as warehouse_map.yaml so the new map drops in cleanly.
+  delta: 0.05
 
-  # # Scan matching parameters
-  # lskip: 0                   # Skip every lskip'th laser beam (0 = no skip)
-  # kernelSize: 1              # Size of the scan matching kernel
-  # iterations: 5              # Number of iterations for scan matching
-  # lsigma: 0.05               # Sigma of the scan matching Gaussian
-  # ogain: 3.0                 # Gain for smoothing
+  # ---- Update thresholds ----
+  # Smaller values = more frequent map updates = sharper walls and cones.
+  # Cheap in sim because odom is perfect.
+  linearUpdate:  0.20      # update after every 20 cm of motion
+  angularUpdate: 0.15      # update after every ~8.6 deg of rotation
+  temporalUpdate: 1.0      # also update at least once per second
+  mapUpdateInterval: 1.0   # publish /map at most once per second
 
-  # # Map parameters
-  resampleThreshold: 0.5     # Resampling threshold for particle filter
-  occ_thresh: 0.3           # Threshold for considering a cell as occupied
-  # min_occ: -1                # Minimum occupancy probability
-  # max_occ: 1                 # Maximum occupancy probability
+  # ---- Motion model noise ----
+  # In Gazebo the odom is essentially ground truth, so almost-zero noise
+  # is correct. (On the real robot you would raise these.)
+  srr: 0.01
+  srt: 0.01
+  str: 0.01
+  stt: 0.01
+
+  # ---- Particles ----
+  particles: 50
+
+  # ---- Map post-processing ----
+  resampleThreshold: 0.5
+  occ_thresh: 0.25         # slightly lower so thin cones get marked occupied
+
+  # ---- Initial map size (the grid auto-expands as needed) ----
+  # Warehouse is roughly 30 x 40 m, so a 50 m square is plenty to start.
+  xmin: -25.0
+  xmax:  25.0
+  ymin: -25.0
+  ymax:  25.0
