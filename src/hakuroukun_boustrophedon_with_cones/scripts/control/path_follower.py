@@ -61,12 +61,13 @@ class PurePursuitNode:
         self.rev_start = None
         self.min_front = float('inf')
         self.prog_hist = collections.deque(maxlen=200)
+        self.pose_hist = collections.deque(maxlen=200) 
 
         # -------- TF Buffer --------
         self.tf_buf = tf2_ros.Buffer(cache_time=rospy.Duration(10.0))
         self.tf_lst = tf2_ros.TransformListener(self.tf_buf)
         self.path_frame = "map"
-        self.target_frame = "odom"
+        self.target_frame = "map"
 
         # -------- ROS I/O --------
         rospy.Subscriber('/hakuroukun_pose/rear_wheel_odometry', Odometry, self.odom_cb)
@@ -85,16 +86,24 @@ class PurePursuitNode:
             self.stop_robot()
 
     def odom_cb(self, msg):
-        x = msg.pose.pose.position.x
-        y = msg.pose.pose.position.y
-        q = (msg.pose.pose.orientation.x,
-             msg.pose.pose.orientation.y,
-             msg.pose.pose.orientation.z,
-             msg.pose.pose.orientation.w)
-        yaw = Rotation.from_quat(q).as_euler("zyx")[0]
+        try:
+            ps = PoseStamped()
+            ps.header = msg.header                # frame_id should be "odom"
+            ps.pose = msg.pose.pose
+            ps.header.stamp = rospy.Time(0)       # use latest TF
+            ps_map = self.tf_buf.transform(ps, "map", rospy.Duration(0.1))
+        except Exception as e:
+            rospy.logwarn_throttle(2.0,
+                f"[path_follower] odom→map TF failed: {e}")
+            return
+
+        x = ps_map.pose.position.x
+        y = ps_map.pose.position.y
+        q = ps_map.pose.orientation
+        yaw = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_euler("zyx")[0]
         self.current_pose = (x, y, yaw)
 
-        # progress tracking
+        # progress tracking (now in map frame — wheel slip can't fake it)
         now = rospy.Time.now().to_sec()
         if hasattr(self, 'last_pos'):
             d = math.hypot(x - self.last_pos[0], y - self.last_pos[1])
@@ -102,29 +111,18 @@ class PurePursuitNode:
             while self.prog_hist and now - self.prog_hist[0][0] > self.stuck_time:
                 self.prog_hist.popleft()
         self.last_pos = (x, y)
+        
+        self.pose_hist.append((now, x, y))
+        while self.pose_hist and now - self.pose_hist[0][0] > self.stuck_time:
+            self.pose_hist.popleft()
 
     def path_cb(self, msg):
-        self.path_frame = msg.header.frame_id if msg.header.frame_id else self.path_frame
-
-        pts = []
-        for ps in msg.poses:
-            try:
-                ps_in = PoseStamped()
-                ps_in.header = msg.header
-                ps_in.pose = ps.pose
-                ps_in.header.stamp = rospy.Time(0)  # latest TF
-
-                ps_out = self.tf_buf.transform(ps_in, self.target_frame, rospy.Duration(0.2))
-                pts.append((ps_out.pose.position.x, ps_out.pose.position.y))
-            except Exception as e:
-                rospy.logwarn_throttle(
-                    1.0,
-                    f"Path TF transform failed ({self.path_frame}->{self.target_frame}): {e}"
-                )
-                self.path_available = False
-                return
-
-        self.path_points = pts
+        self.path_frame = msg.header.frame_id if msg.header.frame_id else "map"
+        if self.path_frame != "map":
+            rospy.logwarn_throttle(2.0,
+                f"[path_follower] expected path in 'map', got '{self.path_frame}'")
+        self.path_points = [(p.pose.position.x, p.pose.position.y)
+                            for p in msg.poses]
         self.closest_i = 0
         self.path_available = bool(self.path_points)
 
@@ -167,19 +165,18 @@ class PurePursuitNode:
                 rate.sleep()
                 continue
 
-            # Emergency stop (always active safety)
-            if self.min_front < 0.45:
-                rospy.logwarn_throttle(1.0, f"[path_follower] EMERGENCY STOP min_front={self.min_front:.2f}")
-                self.publish_cmd(0.0, 0.0)
-                rate.sleep()
-                continue
-
-            # Normal PP
+            # Normal PP — compute desired forward command
             v_fwd, steer_fwd = self.compute_pp()
             now = time.time()
 
-            moved = sum(d for _, d in self.prog_hist)
-            stuck = moved < self.progress_min
+            # Net displacement over the stuck window (immune to jitter)
+            if len(self.pose_hist) >= 2:
+                _, x0, y0 = self.pose_hist[0]
+                _, x1, y1 = self.pose_hist[-1]
+                net_disp = math.hypot(x1 - x0, y1 - y0)
+            else:
+                net_disp = float('inf')   # not enough history yet → not stuck
+            stuck = net_disp < self.progress_min
             heading_bad = abs(self.last_alpha) > self.ang_thresh
 
             # Start / reset stuck timer
@@ -188,15 +185,16 @@ class PurePursuitNode:
                     self.stuck_start = now
             else:
                 self.stuck_start = None
-
             stuck_dur = 0.0 if self.stuck_start is None else (now - self.stuck_start)
 
-            # Trigger reverse only when:
+            # Trigger reverse when:
             #  A) stuck for a while, OR
-            #  B) front is blocked AND (stuck a bit OR heading is bad)
+            #  B) front is blocked AND (stuck a bit OR heading is bad), OR
+            #  C) something is dangerously close — back up immediately
             want_recover_reverse = (
                 (stuck_dur > self.stuck_time) or
-                ((self.min_front < self.front_stop) and (stuck_dur > 0.3 or heading_bad))
+                ((self.min_front < self.front_stop) and (stuck_dur > 0.3 or heading_bad)) or
+                (self.min_front < 0.45)
             )
 
             # FSM with cooldown to prevent oscillation
@@ -204,7 +202,8 @@ class PurePursuitNode:
                 if self.rev_enable and (now > self.cooldown_until) and want_recover_reverse:
                     self.mode = "REVERSE"
                     self.rev_start = now
-                    rospy.loginfo(f"MODE → REVERSE (recover) front={self.min_front:.2f} stuck={stuck_dur:.2f} heading_bad={heading_bad}")
+                    rospy.loginfo(f"MODE → REVERSE (recover) front={self.min_front:.2f} "
+                                f"stuck={stuck_dur:.2f} heading_bad={heading_bad}")
             else:  # REVERSE
                 duration = now - (self.rev_start if self.rev_start is not None else now)
 
@@ -221,14 +220,22 @@ class PurePursuitNode:
                 steer = self.reverse_steering()
             else:
                 v, steer = v_fwd, steer_fwd
-                
-             # 1Hz status heartbeat (great for demo)
+
+            # 1Hz status heartbeat (great for demo)
             rospy.loginfo_throttle(
                 1.0,
                 f"[pf] mode={self.mode} v={v:.2f} steer={steer:.2f} "
                 f"min_front={self.min_front:.2f} alpha={self.last_alpha:.2f} "
-                f"closest_i={self.closest_i}/{len(self.path_points)} stuck_dur={stuck_dur:.1f}"
+                f"closest_i={self.closest_i}/{len(self.path_points)} "
+                f"stuck_dur={stuck_dur:.1f} net_disp={net_disp:.2f}"
             )
+
+            # SAFETY VETO: block forward motion into close obstacles, but
+            # never block reverse — that's how we recover.
+            if v > 0.0 and self.min_front < 0.45:
+                rospy.logwarn_throttle(1.0,
+                    f"[path_follower] FORWARD VETO min_front={self.min_front:.2f}")
+                v = 0.0
 
             self.publish_cmd(v, steer)
             rate.sleep()
