@@ -117,8 +117,12 @@ class OfflineCoveragePlanner:
             ps.header.stamp = rospy.Time(0)
             ps_map = self.tf_buf.transform(ps, "map", rospy.Duration(0.2))
             self.start_pose = (ps_map.pose.position.x, ps_map.pose.position.y)
+            q = ps_map.pose.orientation
+            from scipy.spatial.transform import Rotation
+            self.start_yaw = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_euler("zyx")[0]
         except Exception:
             self.start_pose = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+            self.start_yaw = 0.0
 
     def check_and_plan(self, event):
         if self.path_generated:
@@ -186,7 +190,7 @@ class OfflineCoveragePlanner:
             return
 
         # --- 3) order cells, greedy nearest-neighbour from the robot ---
-        ordered = self._order_cells(cell_paths, self.start_pose)
+        ordered = self._order_cells(cell_paths, self.start_pose, self.start_yaw)
 
         # --- 4) assemble: robot -> cell -> cell, A* only for transits ---
         global_wpts = [self.start_pose]
@@ -206,11 +210,12 @@ class OfflineCoveragePlanner:
             rospy.logerr("[BCD] assembled path is empty.")
             return
 
-        # add a straight lead-in from the robot's true pose, if it was snapped
         if math.hypot(raw_start[0] - snapped[0],
-                      raw_start[1] - snapped[1]) > 1e-3:
-            full = self._densify_straight(raw_start, snapped)[:-1] + full
+                    raw_start[1] - snapped[1]) > 1e-3:
+            lead = self._connect(astar_grid, raw_start, snapped)
+            full = lead[:-1] + full
             full = self._dedup(full)
+            rospy.loginfo("[BCD] lead-in: %d pts (raw_start -> snapped)" % len(lead))
 
         self.publish_path(full)
         dt = (rospy.Time.now() - t0).to_sec()
@@ -393,25 +398,33 @@ class OfflineCoveragePlanner:
     # =====================================================================
     #  CELL ORDERING
     # =====================================================================
-    def _order_cells(self, cell_paths, start):
-        """Greedy nearest-neighbour. Each cell path can be entered from either
-        end; the end nearest the current position becomes the entry."""
+    def _order_cells(self, cell_paths, start, start_yaw=None):
         remaining = list(cell_paths)
         ordered = []
         cur = start
+        cur_yaw = start_yaw
+        HEAD_WEIGHT = 1.5  # meters of "penalty" per radian of heading error
+
         while remaining:
-            best_i, best_d, best_rev = 0, float('inf'), False
+            best_i, best_score, best_rev = 0, float('inf'), False
             for i, wp in enumerate(remaining):
-                d_head = math.hypot(wp[0][0] - cur[0],  wp[0][1] - cur[1])
-                d_tail = math.hypot(wp[-1][0] - cur[0], wp[-1][1] - cur[1])
-                if d_head < best_d:
-                    best_d, best_i, best_rev = d_head, i, False
-                if d_tail < best_d:
-                    best_d, best_i, best_rev = d_tail, i, True
+                for use_rev, ep in [(False, wp[0]), (True, wp[-1])]:
+                    dx, dy = ep[0] - cur[0], ep[1] - cur[1]
+                    d = math.hypot(dx, dy)
+                    if cur_yaw is not None and d > 0.1:
+                        bearing = math.atan2(dy, dx)
+                        head_err = abs(math.atan2(math.sin(bearing - cur_yaw),
+                                                math.cos(bearing - cur_yaw)))
+                        d += HEAD_WEIGHT * head_err
+                    if d < best_score:
+                        best_score, best_i, best_rev = d, i, use_rev
             wp = remaining.pop(best_i)
             if best_rev:
                 wp = wp[::-1]
             ordered.append(wp)
+            if len(wp) >= 2:
+                cur_yaw = math.atan2(wp[-1][1] - wp[-2][1],
+                                    wp[-1][0] - wp[-2][0])
             cur = wp[-1]
         return ordered
 
