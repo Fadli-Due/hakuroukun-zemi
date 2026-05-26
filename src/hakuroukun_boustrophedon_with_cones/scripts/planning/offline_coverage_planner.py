@@ -28,7 +28,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import math
 import rospy
 import numpy as np
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, label as nd_label
 
 from nav_msgs.msg import OccupancyGrid, Path, Odometry
 from geometry_msgs.msg import PoseStamped
@@ -80,7 +80,7 @@ class OfflineCoveragePlanner:
         # turn_margin: trim each lane end by this much (m) to leave room for
         # the 180-degree turn. BCD cell ends are obstacle boundaries, so
         # trimming there costs no real coverage.
-        self.turn_margin    = rospy.get_param("turn_margin", 0.30)
+        self.turn_margin    = rospy.get_param("turn_margin", 0.80)
         # cells smaller than this (m^2) are dropped as inflation slivers.
         self.min_cell_area  = rospy.get_param("min_cell_area", 1.0)
         self.astar_conn     = rospy.get_param("astar_connectivity", 8)
@@ -250,9 +250,51 @@ class OfflineCoveragePlanner:
         dist_m = distance_transform_edt(free_sub) * res
         inflated_free = free_sub & (dist_m > self.robot_radius)
 
-        grid = np.where(inflated_free, 0, 100).astype(np.int16)
+        # Compute crop origin here so we can convert robot world coords below.
         crop_ox = ox + x0 * res
         crop_oy = oy + y0 * res
+
+        # ---- connected-component filter ------------------------------------
+        # Remove free-space islands that are disconnected from the robot's
+        # starting cell.  This prevents stray noise pixels (or areas outside
+        # the warehouse walls that the map encodes as free) from inflating the
+        # BCD cell count or the coverage denominator.
+        labeled, n_comp = nd_label(inflated_free)
+        if n_comp > 1:
+            # Robot start in crop-frame grid coordinates.
+            rx, ry = self.start_pose
+            gx_r = int((rx - crop_ox) / res)
+            gy_r = int((ry - crop_oy) / res)
+            # Clamp to grid bounds.
+            H_sub, W_sub = inflated_free.shape
+            gx_r = max(0, min(W_sub - 1, gx_r))
+            gy_r = max(0, min(H_sub - 1, gy_r))
+
+            robot_comp = int(labeled[gy_r, gx_r])
+
+            if robot_comp == 0:
+                # Robot start landed in an inflated (non-free) cell — fall back
+                # to the largest component so we always plan *something*.
+                comp_sizes = np.bincount(labeled.ravel())
+                comp_sizes[0] = 0          # ignore background
+                robot_comp = int(comp_sizes.argmax())
+                rospy.logwarn(
+                    "[BCD] CC-filter: start_pose not in any free component "
+                    "after inflation; keeping largest (comp %d, %d cells). "
+                    "Consider reducing robot_radius." %
+                    (robot_comp, comp_sizes[robot_comp]))
+            else:
+                kept_cells = int((labeled == robot_comp).sum())
+                removed = n_comp - 1
+                rospy.loginfo(
+                    "[BCD] CC-filter: kept comp %d/%d (%d cells), "
+                    "removed %d disconnected island(s)." %
+                    (robot_comp, n_comp, kept_cells, removed))
+
+            inflated_free = (labeled == robot_comp)
+        # -------------------------------------------------------------------
+
+        grid = np.where(inflated_free, 0, 100).astype(np.int16)
         return grid, crop_ox, crop_oy, res
 
     def _snap_to_free(self, grid, crop_ox, crop_oy, res, pose):
