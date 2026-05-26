@@ -20,11 +20,10 @@ def world_to_grid(x, y):
     return int((x - origin_x) / resolution), int((y - origin_y) / resolution)
 
 def initialize_persistent_grid(map_msg):
-    """ Initialize persistent grid by copying data from the original map. """
     global persistent_grid
     width, height = map_msg.info.width, map_msg.info.height
     persistent_grid = np.array(map_msg.data, dtype=np.int8).reshape((height, width))
-    persistent_grid[persistent_grid == -1] = 0
+    
 
 def generate_circular_mask(radius):
     """ Precompute a circular mask for fast cleaning area expansion. """
@@ -71,8 +70,8 @@ def apply_cleaning():
         mask = circular_mask[:mask_height, :mask_width]
 
         # Only mark free space (0) as cleaned (100)
-        #roi[mask & (roi == 0)] = 50
-        roi[mask & (roi != 100)] = 50        # new: mark 0 or –1 as cleaned
+        roi[mask & (roi == 0)] = 50
+        #roi[mask & (roi != 100)] = 50        # new: mark 0 or –1 as cleaned
 
 
 def map_callback(msg):
