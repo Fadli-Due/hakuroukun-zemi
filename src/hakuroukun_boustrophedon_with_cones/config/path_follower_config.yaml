@@ -1,7 +1,7 @@
 pure_pursuit_hakuroukun:
   max_speed: 0.35
   min_speed: 0.18
-  lookahead_distance: 0.75
+  lookahead_distance: 1.5
   wheelbase: 1.0
   control_rate: 10
   max_search_ahead: 100
@@ -16,6 +16,6 @@ reverse:
   front_clear_range: 1.60
   front_fov_deg: 70
   angle_threshold_deg: 150
-  stuck_time: 1.5
+  stuck_time: 3.0
   progress_min: 0.04
   cooldown: 3.0
