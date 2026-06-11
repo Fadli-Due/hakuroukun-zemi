@@ -1,10 +1,10 @@
 pure_pursuit_hakuroukun:
   max_speed: 0.35
   min_speed: 0.18
-  lookahead_distance: 1.5
+  lookahead_distance: 0.8
   wheelbase: 1.0
   control_rate: 10
-  max_search_ahead: 100
+  max_search_ahead: 25
   goal_tolerance: 0.30
   steer_lpf: 0.45
 
