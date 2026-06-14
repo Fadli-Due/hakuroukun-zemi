@@ -88,7 +88,11 @@ class OfflineCoveragePlanner:
         self.crop_margin_m  = rospy.get_param("crop_margin", 1.0)
 
         # ---- ROS I/O --------------------------------------------------------
-        self.path_pub = rospy.Publisher('/desired_path', Path, queue_size=1, latch=True)
+        # Publish the BASELINE BCD path here. local_replanner.py subscribes to
+        # this and republishes the live (possibly modified) path on /desired_path,
+        # which the path follower tracks. This separation lets us cleanly
+        # distinguish "offline planned" from "online executed" in the thesis.
+        self.path_pub = rospy.Publisher('/planned_path', Path, queue_size=1, latch=True)
         rospy.Subscriber('/map', OccupancyGrid, self.map_cb)
         rospy.Subscriber('/hakuroukun_pose/rear_wheel_odometry', Odometry, self.odom_cb)
 
@@ -541,7 +545,7 @@ class OfflineCoveragePlanner:
             ps.pose.orientation.w = 1.0
             msg.poses.append(ps)
         self.path_pub.publish(msg)
-        rospy.loginfo("[BCD] published /desired_path with %d points" % len(points))
+        rospy.loginfo("[BCD] published /planned_path with %d points" % len(points))
 
 
 if __name__ == '__main__':
