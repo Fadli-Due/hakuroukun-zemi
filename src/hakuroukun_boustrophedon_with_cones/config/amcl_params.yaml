@@ -30,12 +30,12 @@ resample_interval: 1
 
 # ---- Update thresholds (how much robot must move before AMCL updates) ----
 update_min_d:  0.15          # 15 cm linear
-update_min_a:  0.25          # ~14 deg angular
+update_min_a:  0.15          # ~14 deg angular
 
 # ---- Laser model ----
 # likelihood_field: fast, works well for solid walls.  Good choice for sim.
 laser_model_type:          likelihood_field
-laser_max_beams:           30        # subsample the 150-beam merged scan for speed
+laser_max_beams:           60        # subsample the 150-beam merged scan for speed
 laser_max_range:           20.0      # match merger maxRange
 laser_min_range:           0.3       # match merger range_min
 laser_z_hit:               0.90      # high because sim scans are clean
@@ -47,14 +47,15 @@ laser_likelihood_max_dist: 2.0       # search radius for likelihood field
 # ---- Odometry motion model ----
 # Using diff model for the Ackermann robot (standard approximation).
 # In Gazebo, wheel odom is near-perfect, so noise params are small.
-odom_model_type: diff
+odom_model_type: omni
 alpha1: 0.10    # rotation noise from rotation
 alpha2: 0.10    # rotation noise from translation
 alpha3: 0.05    # translation noise from translation
 alpha4: 0.05    # translation noise from rotation
+alpha5: 0.05    # additional translation noise (e.g. slippage)
 
 # ---- Misc ----
 transform_tolerance:  0.20   # seconds; AMCL TF publish lag tolerance
 recovery_alpha_slow:  0.001    # disable random particle injection in sim
-recovery_alpha_fast:  0.001    #   (we trust the initial pose)
+recovery_alpha_fast:  0.1    #   (we trust the initial pose)
 gui_publish_rate:     10.0   # rate for publishing particle cloud to RViz (Hz)
