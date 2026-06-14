@@ -52,7 +52,7 @@ alpha1: 0.10    # rotation noise from rotation
 alpha2: 0.10    # rotation noise from translation
 alpha3: 0.05    # translation noise from translation
 alpha4: 0.05    # translation noise from rotation
-alpha5: 0.05    # additional translation noise (e.g. slippage)
+alpha5: 0.05
 
 # ---- Misc ----
 transform_tolerance:  0.20   # seconds; AMCL TF publish lag tolerance
