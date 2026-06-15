@@ -1,0 +1,86 @@
+<launch>
+    <!-- Real-robot variant of offline_path_planning.launch.
+
+         Differences vs. the simulation launches (offline_path_planning.launch,
+         offline_path_planning_conemap.launch):
+           - No AMCL. Outdoors the RTK-GPS + IMU (via hakuroukun_pose_node)
+             provide a global pose that is already map-anchored, so
+             probabilistic laser localization is not needed.
+           - map -> odom is published by map_odom_calibrator.py. It starts
+             identity and is updated at runtime when you click in RViz with
+             the "2D Pose Estimate" tool (same workflow as AMCL).
+           - odom -> base_link is driven by odom_tf_broadcaster.py, which
+             reads /hakuroukun_pose/rear_wheel_odometry.
+           - Planner, local replanner and path follower are unchanged from
+             the simulation launches.
+
+         Prerequisites: bringup_hakuroukun_robot.launch must be running first
+         (it provides robot_description, the LiDAR stack, /scan_multi, and
+         /hakuroukun_pose/rear_wheel_odometry). -->
+
+    <!-- Arguments -->
+    <arg name="open_rviz"   default="true"/>
+    <arg name="map_file"    default="$(find hakuroukun_boustrophedon_with_cones)/maps/conemap_planning.yaml"/>
+
+    <!-- Optional initial map->odom offset. Rarely needed: usually you start
+         with identity and calibrate in RViz via "2D Pose Estimate". -->
+    <arg name="init_x"   default="0.0"/>
+    <arg name="init_y"   default="0.0"/>
+    <arg name="init_yaw" default="0.0"/>
+
+    <!-- Load planner + follower + replanner params -->
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/boustrophedon_config.yaml" command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/path_follower_config.yaml" command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/local_replanner_config.yaml" command="load" />
+
+    <!-- Map Server -->
+    <node pkg="map_server" type="map_server" name="map_server" args="$(arg map_file)" />
+
+    <!-- map -> odom (dynamic, calibrated via RViz "2D Pose Estimate") -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="map_odom_calibrator.py"
+          name="map_odom_calibrator"
+          output="screen">
+        <param name="init_x"   value="$(arg init_x)"/>
+        <param name="init_y"   value="$(arg init_y)"/>
+        <param name="init_yaw" value="$(arg init_yaw)"/>
+    </node>
+
+    <!-- odom -> base_link (live, from hakuroukun_pose_node) -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="odom_tf_broadcaster.py"
+          name="odom_tf_broadcaster"
+          output="screen">
+        <param name="odom_frame" value="odom"/>
+        <param name="base_frame" value="base_link"/>
+        <param name="odom_topic" value="/hakuroukun_pose/rear_wheel_odometry"/>
+    </node>
+
+    <!-- Offline Boustrophedon Planner (publishes /planned_path, latched) -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="offline_coverage_planner.py"
+          name="offline_coverage_planner"
+          output="screen" />
+
+    <!-- Online obstacle-avoidance layer: subscribes /planned_path + /scan_multi,
+         publishes /desired_path with detours spliced in around persistent
+         obstacles. The path follower tracks /desired_path. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="local_replanner.py"
+          name="local_replanner"
+          output="screen" />
+
+    <!-- Path Follower (tracks /desired_path) -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="path_follower.py"
+          name="path_follower"
+          output="screen">
+        <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+    </node>
+
+    <!-- RViz -->
+    <group if="$(arg open_rviz)">
+        <node pkg="rviz" type="rviz" name="rviz" required="true"
+              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/boustrophedon_with_cones.rviz"/>
+    </group>
+</launch>
