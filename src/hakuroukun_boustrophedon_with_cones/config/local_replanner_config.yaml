@@ -1,0 +1,50 @@
+# =============================================================================
+#  local_replanner_config.yaml
+#  Parameters for the online obstacle-avoidance layer (local_replanner.py).
+#  Loaded by offline_path_planning.launch and ..._conemap.launch.
+# =============================================================================
+
+local_replanner:
+  # ---- persistence -----------------------------------------------------------
+  # An obstacle must remain in the same cell continuously for this many seconds
+  # before the replanner will route around it. Tuned high so a person standing
+  # still on the path (even for several seconds) does NOT cause the robot to
+  # drive around them -- the reflex stop in path_follower.py handles that case.
+  # Only static obstacles (boxes, fixed equipment) trigger a detour.
+  persistence_threshold: 7.0
+
+  # A cell that has not been hit for this long is forgotten. Should be much
+  # smaller than persistence_threshold; ~1s smooths over single-scan dropouts.
+  clear_time: 1.0
+
+  # ---- local obstacle window -------------------------------------------------
+  # Side length (m) of the obstacle grid window centred on the robot. Keep
+  # this larger than 2 * lookahead_check_m so the entire lookahead is covered
+  # without re-centring every cycle.
+  window_size_m: 15.0
+
+  # ---- evaluation -----------------------------------------------------------
+  # How often the detour check runs (Hz). A* doesn't run on the scan callback.
+  eval_rate: 2.0
+
+  # How far ahead along the path to scan for blockages (m).
+  lookahead_check_m: 6.0
+
+  # After the last blocked path index, rejoin the baseline this many metres
+  # further on so the rejoin point has clearance.
+  rejoin_margin_m: 1.5
+
+  # ---- LiDAR gating ---------------------------------------------------------
+  # Drop returns closer than this (m) -- avoids the robot's own footprint.
+  scan_min_range: 0.30
+
+  # Drop returns farther than this (m) -- noise / out of useful range.
+  scan_max_range: 15.0
+
+  # ---- frames ---------------------------------------------------------------
+  map_frame: "map"
+  laser_frame: "laser_link"
+
+# NOTE: the obstacle inflation distance used for A* detours is read from the
+# planner's `robot_radius` parameter (loaded by boustrophedon_config.yaml),
+# so detour clearance always matches baseline clearance.

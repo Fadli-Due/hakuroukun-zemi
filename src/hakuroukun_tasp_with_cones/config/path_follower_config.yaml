@@ -1,21 +1,21 @@
 pure_pursuit_hakuroukun:
-  max_speed: 0.35           # Maximum speed [m/s]
-  min_speed: 0.25            # Minimum speed [m/s]
-  #lookahead_distance: 1.0   # Lookahead distance [m]
-  lookahead_distance: 0.7  # Lookahead distance [m]
-  wheelbase: 1.0            # Wheelbase [m]
-  control_rate: 10           # Control loop rate [Hz]
+  max_speed: 0.28
+  min_speed: 0.12
+  lookahead_distance: 0.8
+  wheelbase: 1.0
+  control_rate: 10
+  max_search_ahead: 100
+  goal_tolerance: 0.35
+  steer_lpf: 0.45
 
 reverse:
   enable: true
-  speed: 0.25            # reverse speed (m/s)
-  max_duration: 2.0      # seconds (safety cap)
-  #front_stop_range: 0.8  
-  #front_clear_range: 1.2 
-  front_stop_range: 0.9  # m (enter reverse if obstacle closer)
-  front_clear_range: 1.3 # m (leave reverse when clear)
-  front_fov_deg: 90      # degrees used for min range check
-  angle_threshold_deg: 100
-  stuck_time: 1.5        # seconds window for progress check
-  progress_min: 0.05     # meters progress required to avoid "stuck"
-
+  speed: 0.20
+  max_duration: 1.5
+  front_stop_range: 0.85
+  front_clear_range: 1.20
+  front_fov_deg: 120
+  angle_threshold_deg: 110
+  stuck_time: 1.0
+  progress_min: 0.03
+  cooldown: 2.0

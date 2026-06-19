@@ -1,0 +1,31 @@
+# =============================================================================
+#  boustrophedon_config.yaml
+#  Parameters for the offline BCD coverage planner (offline_coverage_planner.py).
+#  Loaded globally by offline_path_planning.launch.
+# =============================================================================
+
+# --- robot footprint / clearance --------------------------------------------
+# Single inflation distance (m): keeps the robot CENTRE this far from walls.
+# This is the ONLY clearance applied (no double counting). Roughly:
+#   robot_radius ~= half robot width + small safety margin.
+# Raise it if the robot clips walls; lower it (toward ~0.45) to recover
+# coverage in tight regions.
+robot_radius: 1.0
+
+# --- coverage pattern --------------------------------------------------------
+# Distance between adjacent sweep lanes (m). Set equal to the cleaning width
+# for edge-to-edge coverage. Smaller -> more overlap, higher coverage, slower.
+lane_spacing: 1.0
+
+# Trim each lane end by this much (m) to leave room for the 180-deg turn.
+# BCD lane ends sit on obstacle boundaries, so trimming costs little real
+# coverage. Increase if the robot struggles to turn at lane ends.
+turn_margin: 0.80
+
+# Cells smaller than this (m^2) are discarded as inflation slivers.
+min_cell_area: 2.0
+
+# --- path shaping ------------------------------------------------------------
+astar_connectivity: 8       # 8 = allow diagonal transit moves, 4 = orthogonal
+densify_step: 0.20          # spacing (m) of points emitted along the path
+crop_margin: 1.0            # extra margin (m) kept around the known map region

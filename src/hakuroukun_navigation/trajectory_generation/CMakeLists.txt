@@ -34,6 +34,7 @@ set(HEADERS
     )
 
 add_library(trajectory_lib ${SOURCES} ${HEADERS})
+add_dependencies(trajectory_lib ${sdv_msgs_EXPORTED_TARGETS})
 target_link_libraries(trajectory_lib ${catkin_LIBRARIES})
 
 catkin_package(

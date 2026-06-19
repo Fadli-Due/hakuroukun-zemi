@@ -194,7 +194,7 @@ def publish_raw_cones_point_cloud(cone_id, sliding_window_positions):
 def detected_cones_callback(msg):
     global detected_cones, cone_lines, cone_positions_by_id
     try:
-        transform = tf_buffer.lookup_transform("odom", "camera_link", rospy.Time(0))
+        transform = tf_buffer.lookup_transform("map", "camera_link", rospy.Time(0))
         for marker in msg.markers:
             cone_id = marker.id  # Use marker ID as the unique cone identifier
             cone_camera = [marker.pose.position.x, marker.pose.position.y, marker.pose.position.z]
@@ -327,7 +327,7 @@ def publish_obstacles(cone_lines, resolution):
 
     # Create PointCloud2 message
     header = rospy.Header()
-    header.frame_id = "odom"
+    header.frame_id = "map"
     header.stamp = rospy.Time.now()
     point_cloud_msg = pc2.create_cloud_xyz32(header, points)
 

@@ -3,10 +3,13 @@ import math, time, collections
 import numpy as np
 import rospy
 from nav_msgs.msg import Odometry, Path
-from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float64MultiArray, Bool
 from scipy.spatial.transform import Rotation
+import tf2_ros
+from geometry_msgs.msg import PoseStamped
+import tf2_geometry_msgs  # IMPORTANT: registers PoseStamped support for tf2 Buffer.transform()
+
 
 class PurePursuitNode:
     def __init__(self):
@@ -14,19 +17,19 @@ class PurePursuitNode:
 
         # ========== Forward-drive parameters ==========
         pp_ns = "pure_pursuit_hakuroukun"
-        self.MAX_SPEED        = rospy.get_param(f"{pp_ns}/max_speed", 0.6)
-        self.MIN_SPEED        = rospy.get_param(f"{pp_ns}/min_speed", 0.4)
+        self.MAX_SPEED        = rospy.get_param(f"{pp_ns}/max_speed", 0.4)
+        self.MIN_SPEED        = rospy.get_param(f"{pp_ns}/min_speed", 0.25)
         self.MAX_ACCEL        = rospy.get_param("/hakuroukun_steering_controller/linear/x/max_acceleration", 2.5)
         self.MAX_STEERING     = rospy.get_param("/hakuroukun_steering_controller/angular/z/max_position", 0.78)
         self.MIN_STEERING     = rospy.get_param("/hakuroukun_steering_controller/angular/z/min_position", -0.78)
-        self.lookahead_dist   = rospy.get_param(f"{pp_ns}/lookahead_distance", 0.8)
+        self.lookahead_dist   = rospy.get_param(f"{pp_ns}/lookahead_distance", 0.6)
         self.wheelbase        = rospy.get_param(f"{pp_ns}/wheelbase", 1.1)
         self.ctrl_rate        = rospy.get_param(f"{pp_ns}/control_rate", 10)
 
         # ========== Reverse parameters ==========
         rp = rospy.get_param("reverse", {})
         self.rev_enable   = rp.get("enable", True)
-        self.rev_speed    = abs(rp.get("speed", 0.25))          # magnitude
+        self.rev_speed    = abs(rp.get("speed", 0.25))
         self.rev_max_t    = rp.get("max_duration", 2.0)
         self.front_stop   = rp.get("front_stop_range", 0.8)
         self.front_clear  = rp.get("front_clear_range", 1.2)
@@ -34,20 +37,36 @@ class PurePursuitNode:
         self.ang_thresh   = math.radians(rp.get("angle_threshold_deg", 100))
         self.stuck_time   = rp.get("stuck_time", 1.5)
         self.progress_min = rp.get("progress_min", 0.05)
+        
+        # recovery bookkeeping
+        self.stuck_start = None
+        self.cooldown_until = 0.0
+        self.rev_cooldown = rp.get("cooldown", 3.0)   # seconds
+
+        # extra tuning params
+        self.goal_tol = rospy.get_param(f"{pp_ns}/goal_tolerance", 0.4)
+        self.steer_lpf = rospy.get_param(f"{pp_ns}/steer_lpf", 0.35)  # weight on previous
+        self.steer_prev = 0.0
+        self.closest_i = 0
+        self.max_search_ahead = rospy.get_param(f"{pp_ns}/max_search_ahead", 80)
 
         # -------- internal state --------
-        self.current_pose = None        # (x, y, yaw)
-        self.path_points  = []          # list[(x,y)]
+        self.current_pose = None        # (x, y, yaw) in odom
+        self.path_points  = []          # list[(x,y)] in target_frame
         self.path_available = False
         self.previous_speed = 0.0
-        self.last_alpha = 0.0           # heading error from PP
-        self.mode = "FORWARD"           # or "REVERSE"
+        self.last_alpha = 0.0
+
+        self.mode = "FORWARD"
         self.rev_start = None
         self.min_front = float('inf')
-        self.prog_hist = collections.deque(maxlen=200)  # (time, dist) tuples
+        self.prog_hist = collections.deque(maxlen=200)
 
-        self.velocity_cmd = 0.0
-        self.steering_cmd = 0.0
+        # -------- TF Buffer --------
+        self.tf_buf = tf2_ros.Buffer(cache_time=rospy.Duration(10.0))
+        self.tf_lst = tf2_ros.TransformListener(self.tf_buf)
+        self.path_frame = "map"
+        self.target_frame = "odom"
 
         # -------- ROS I/O --------
         rospy.Subscriber('/hakuroukun_pose/rear_wheel_odometry', Odometry, self.odom_cb)
@@ -55,14 +74,13 @@ class PurePursuitNode:
         rospy.Subscriber('/scan_multi', LaserScan, self.scan_cb)
         rospy.Subscriber('/stop_signal', Bool, self.stop_cb)
 
-        self.cmd_pub = rospy.Publisher('/cmd_controller', Float64MultiArray, queue_size=10)
+        cmd_topic = rospy.get_param("~cmd_topic", "/hakuroukun_steering_controller/cmd_controller")
+        self.cmd_pub = rospy.Publisher(cmd_topic, Float64MultiArray, queue_size=10)
 
-        # register shutdown once (not every loop)
         rospy.on_shutdown(self.stop_robot)
 
-
     # ---------- Callbacks ----------
-    def stop_cb(self, msg):  # external stop signal
+    def stop_cb(self, msg):
         if msg.data:
             self.stop_robot()
 
@@ -81,97 +99,184 @@ class PurePursuitNode:
         if hasattr(self, 'last_pos'):
             d = math.hypot(x - self.last_pos[0], y - self.last_pos[1])
             self.prog_hist.append((now, d))
-            # purge old
             while self.prog_hist and now - self.prog_hist[0][0] > self.stuck_time:
                 self.prog_hist.popleft()
         self.last_pos = (x, y)
 
     def path_cb(self, msg):
-        self.path_points = [(ps.pose.position.x, ps.pose.position.y) for ps in msg.poses]
+        self.path_frame = msg.header.frame_id if msg.header.frame_id else self.path_frame
+
+        pts = []
+        for ps in msg.poses:
+            try:
+                ps_in = PoseStamped()
+                ps_in.header = msg.header
+                ps_in.pose = ps.pose
+                ps_in.header.stamp = rospy.Time(0)  # latest TF
+
+                ps_out = self.tf_buf.transform(ps_in, self.target_frame, rospy.Duration(0.2))
+                pts.append((ps_out.pose.position.x, ps_out.pose.position.y))
+            except Exception as e:
+                rospy.logwarn_throttle(
+                    1.0,
+                    f"Path TF transform failed ({self.path_frame}->{self.target_frame}): {e}"
+                )
+                self.path_available = False
+                return
+
+        self.path_points = pts
+        self.closest_i = 0
         self.path_available = bool(self.path_points)
 
     def scan_cb(self, msg):
-        #handling for weird scans (all inf/NaN or empty)
         n = len(msg.ranges)
         if n == 0:
             self.min_front = float('inf')
             return
+
         angles = msg.angle_min + np.arange(n) * msg.angle_increment
         mask   = np.abs(angles) <= self.front_fov/2.0
         if not np.any(mask):
             self.min_front = float('inf')
             return
+
         rng = np.asarray(msg.ranges)[mask]
+
+        # reject invalid + too-small values
         rng = rng[np.isfinite(rng)]
+        if msg.range_min > 0:
+            rng = rng[rng >= msg.range_min]
+        rng = rng[rng > 0.02]
+
         self.min_front = float(np.min(rng)) if rng.size else float('inf')
 
     # ---------- Main loop ----------
     def run(self):
         rate = rospy.Rate(self.ctrl_rate)
+
         while not rospy.is_shutdown():
-            if self.current_pose and self.path_available:
-                v_fwd, steer_fwd = self.compute_pp()  # also updates self.last_alpha
-                now = time.time()
-                moved = sum(d for _, d in self.prog_hist)
-                stuck = moved < self.progress_min
-                heading_bad = abs(self.last_alpha) > self.ang_thresh
+            # Gate 1: pose
+            if not self.current_pose:
+                rospy.logwarn_throttle(2.0, "[path_follower] waiting for odom...")
+                rate.sleep()
+                continue
 
-                # ----- FSM -----
-                if self.mode == "FORWARD":
-                    if self.rev_enable and (self.min_front < self.front_stop or heading_bad or stuck):
-                        #reason logging
-                        reason = ("front" if self.min_front < self.front_stop
-                                  else "heading" if heading_bad
-                                  else "stuck")
-                        self.mode = "REVERSE"
-                        self.rev_start = now
-                        rospy.loginfo(f"MODE → REVERSE ({reason})")
-                elif self.mode == "REVERSE":
-                    duration = now - (self.rev_start if self.rev_start is not None else now)
-                    if (self.min_front > self.front_clear and not heading_bad) or duration > self.rev_max_t:
-                        self.mode = "FORWARD"
-                        rospy.loginfo("MODE → FORWARD")
+            # Gate 2: path
+            if not self.path_available or not self.path_points:
+                rospy.logwarn_throttle(2.0, "[path_follower] waiting for /desired_path...")
+                rate.sleep()
+                continue
 
-                # ----- Command selection -----
-                if self.mode == "REVERSE":
-                    v = -self.rev_speed
-                    steer = self.reverse_steering()
-                else:
-                    v, steer = v_fwd, steer_fwd
+            # Emergency stop (always active safety)
+            if self.min_front < 0.45:
+                rospy.logwarn_throttle(1.0, f"[path_follower] EMERGENCY STOP min_front={self.min_front:.2f}")
+                self.publish_cmd(0.0, 0.0)
+                rate.sleep()
+                continue
 
-                self.publish_cmd(v, steer)
+            # Normal PP
+            v_fwd, steer_fwd = self.compute_pp()
+            now = time.time()
+
+            moved = sum(d for _, d in self.prog_hist)
+            stuck = moved < self.progress_min
+            heading_bad = abs(self.last_alpha) > self.ang_thresh
+
+            # Start / reset stuck timer
+            if stuck:
+                if self.stuck_start is None:
+                    self.stuck_start = now
+            else:
+                self.stuck_start = None
+
+            stuck_dur = 0.0 if self.stuck_start is None else (now - self.stuck_start)
+
+            # Trigger reverse only when:
+            #  A) stuck for a while, OR
+            #  B) front is blocked AND (stuck a bit OR heading is bad)
+            want_recover_reverse = (
+                (stuck_dur > self.stuck_time) or
+                ((self.min_front < self.front_stop) and (stuck_dur > 0.3 or heading_bad))
+            )
+
+            # FSM with cooldown to prevent oscillation
+            if self.mode == "FORWARD":
+                if self.rev_enable and (now > self.cooldown_until) and want_recover_reverse:
+                    self.mode = "REVERSE"
+                    self.rev_start = now
+                    rospy.loginfo(f"MODE → REVERSE (recover) front={self.min_front:.2f} stuck={stuck_dur:.2f} heading_bad={heading_bad}")
+            else:  # REVERSE
+                duration = now - (self.rev_start if self.rev_start is not None else now)
+
+                # Stop reversing when we have space again OR we've reversed long enough
+                if (self.min_front > self.front_clear) or (duration > self.rev_max_t):
+                    self.mode = "FORWARD"
+                    self.cooldown_until = now + self.rev_cooldown
+                    self.stuck_start = None
+                    rospy.loginfo("MODE → FORWARD (recovered)")
+
+            # Command selection
+            if self.mode == "REVERSE":
+                v = -self.rev_speed
+                steer = self.reverse_steering()
+            else:
+                v, steer = v_fwd, steer_fwd
+                
+             # 1Hz status heartbeat (great for demo)
+            rospy.loginfo_throttle(
+                1.0,
+                f"[pf] mode={self.mode} v={v:.2f} steer={steer:.2f} "
+                f"min_front={self.min_front:.2f} alpha={self.last_alpha:.2f} "
+                f"closest_i={self.closest_i}/{len(self.path_points)} stuck_dur={stuck_dur:.1f}"
+            )
+
+            self.publish_cmd(v, steer)
             rate.sleep()
 
     # ---------- Helper functions ----------
     def publish_cmd(self, v, steer):
-        self.velocity_cmd = v
-        self.steering_cmd = steer
         msg = Float64MultiArray()
-        msg.data = [v, steer]
+        msg.data = [float(v), float(steer)]
         self.cmd_pub.publish(msg)
 
     def stop_robot(self):
-        self.publish_cmd(0.0, self.steering_cmd)
+        self.publish_cmd(0.0, 0.0)
 
-    # ---- returns alpha ----
+    def wrap_pi(self, a):
+        return math.atan2(math.sin(a), math.cos(a))
+
+    # ---- returns (speed, steering) ----
     def compute_pp(self):
         x, y, yaw = self.current_pose
-        Lp = self.lookahead_point(x, y)
-        if Lp is None:
+
+        gx, gy = self.path_points[-1]
+        dist_to_final = math.hypot(gx - x, gy - y)
+
+        end_window = 120
+        near_end = (len(self.path_points) - self.closest_i) < end_window
+
+        if near_end and dist_to_final < self.goal_tol:
+            self.last_alpha = 0.0
+            self.previous_speed = 0.0
             return (0.0, 0.0)
 
-        dx, dy = Lp[0] - x, Lp[1] - y
-        alpha = math.atan2(dy, dx) - yaw
-        alpha = math.atan2(math.sin(alpha), math.cos(alpha))
-        self.last_alpha = alpha  # save for FSM
+        Lp = self.lookahead_point(x, y, yaw)
+        rospy.loginfo_throttle(0.5, f"[pp-debug] pose=({x:.2f},{y:.2f},{yaw:.2f}) Lp={Lp} closest_i={self.closest_i}")
+        if Lp is None:
+            fb = min(self.closest_i + 10, len(self.path_points) - 1)
+            Lp = self.path_points[fb]
 
-        if abs(alpha) > math.pi/2:
-            steering = math.copysign(self.MAX_STEERING, alpha)
-        else:
-            steering = math.atan2(2.0 * self.wheelbase * math.sin(alpha), self.lookahead_dist)
+        dx, dy = Lp[0] - x, Lp[1] - y
+        alpha = self.wrap_pi(math.atan2(dy, dx) - yaw)
+        self.last_alpha = alpha
+
+        steering = math.atan2(2.0 * self.wheelbase * math.sin(alpha), self.lookahead_dist)
         steering = max(self.MIN_STEERING, min(self.MAX_STEERING, steering))
 
-        curvature_penalty = max(0.2, 1 - abs(steering) / self.MAX_STEERING)
+        steering = (1.0 - self.steer_lpf) * steering + self.steer_lpf * self.steer_prev
+        self.steer_prev = steering
+
+        curvature_penalty = max(0.25, 1.0 - abs(steering) / self.MAX_STEERING)
         desired_speed = (self.MAX_SPEED - self.MIN_SPEED) * curvature_penalty + self.MIN_SPEED
 
         dt = 1.0 / self.ctrl_rate
@@ -181,25 +286,76 @@ class PurePursuitNode:
         new_speed = self.previous_speed + speed_diff
         self.previous_speed = new_speed
 
+        if new_speed < 0.05:
+            new_speed = 0.05
+
         return new_speed, steering
 
-    def lookahead_point(self, rx, ry):
-        for px, py in self.path_points:
-            if math.hypot(px - rx, py - ry) >= self.lookahead_dist:
-                return (px, py)
-        return None
+    def lookahead_point(self, rx, ry, yaw):
+        if not self.path_points:
+            return None
+
+        def to_robot(dx, dy, yaw):
+            c = math.cos(-yaw)
+            s = math.sin(-yaw)
+            return (c * dx - s * dy, s * dx + c * dy)
+
+        # search only forward from current cursor
+        start = max(0, self.closest_i)
+        end = min(len(self.path_points), start + self.max_search_ahead)
+
+        best_i = start
+        best_d2 = float('inf')
+        for i in range(start, end):
+            px, py = self.path_points[i]
+            d2 = (px - rx) ** 2 + (py - ry) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                best_i = i
+
+        self.closest_i = best_i
+
+        # walk forward along path until lookahead distance is reached
+        dist_acc = 0.0
+        lastx, lasty = self.path_points[best_i]
+
+        for j in range(best_i + 1, len(self.path_points)):
+            x, y = self.path_points[j]
+            dist_acc += math.hypot(x - lastx, y - lasty)
+            lastx, lasty = x, y
+
+            if dist_acc >= self.lookahead_dist:
+                dx, dy = x - rx, y - ry
+                xr, _ = to_robot(dx, dy, yaw)
+                if xr > 0.0:
+                    return (x, y)
+
+        # fallback moved OUTSIDE the loop
+        for k in (10, 20, 30, 40, 60, 80):
+            fb = min(best_i + k, len(self.path_points) - 1)
+            xfb, yfb = self.path_points[fb]
+            dx, dy = xfb - rx, yfb - ry
+            xr, _ = to_robot(dx, dy, yaw)
+            if xr > -0.05:
+                return (xfb, yfb)
+
+        return self.path_points[-1]
+
 
     # ---- Steering while reversing ----
     def reverse_steering(self):
         x, y, yaw = self.current_pose
-        Lp = self.lookahead_point(x, y)
+
+        # choose target "in front" of the reversed heading
+        Lp = self.lookahead_point(x, y, yaw + math.pi)
         if Lp is None:
             return 0.0
+
         dx, dy = Lp[0] - x, Lp[1] - y
-        alpha_rev = math.atan2(dy, dx) - (yaw + math.pi)
-        alpha_rev = math.atan2(math.sin(alpha_rev), math.cos(alpha_rev))
+        alpha_rev = self.wrap_pi(math.atan2(dy, dx) - (yaw + math.pi))
         steer = math.atan2(2.0 * self.wheelbase * math.sin(alpha_rev), self.lookahead_dist)
         return max(self.MIN_STEERING, min(self.MAX_STEERING, steer))
+
 
 if __name__ == '__main__':
     PurePursuitNode().run()

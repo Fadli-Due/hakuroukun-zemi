@@ -1,0 +1,63 @@
+<launch>
+    <!-- Variant of offline_path_planning.launch for Nguyen Cong Tai's
+         cone-world (30x30area.world). Differences vs. the warehouse version:
+           - default map_file points at conemap_planning.yaml (the painted map)
+           - AMCL initial pose set to (0, 0, 0) to match gazebo_cones.launch spawn
+           - AMCL initial covariance narrowed because the spawn pose is exact -->
+
+    <!-- Arguments -->
+    <arg name="open_rviz"       default="true"/>
+    <arg name="use_static_map"  default="true"/>
+    <arg name="map_file"        default="$(find hakuroukun_boustrophedon_with_cones)/maps/conemap_planning.yaml"/>
+
+    <!-- Load planner + follower + replanner params -->
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/boustrophedon_config.yaml" command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/path_follower_config.yaml" command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/local_replanner_config.yaml" command="load" />
+
+    <!-- Map Server -->
+    <group if="$(arg use_static_map)">
+        <node pkg="map_server" type="map_server" name="map_server" args="$(arg map_file)" />
+    </group>
+
+    <!-- AMCL: yaml first, then per-world overrides. Later <param> wins. -->
+    <node pkg="amcl" type="amcl" name="amcl" output="screen" required="true">
+        <rosparam command="load"
+                  file="$(find hakuroukun_boustrophedon_with_cones)/config/amcl_params.yaml"/>
+        <param name="initial_pose_x" value="0.0"/>
+        <param name="initial_pose_y" value="0.0"/>
+        <param name="initial_pose_a" value="0.0"/>
+        <param name="initial_cov_xx" value="0.25"/>
+        <param name="initial_cov_yy" value="0.25"/>
+        <param name="initial_cov_aa" value="0.07"/>
+        <remap from="scan" to="/scan_multi"/>
+    </node>
+
+    <!-- Offline Boustrophedon Planner (publishes /planned_path, latched) -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="offline_coverage_planner.py"
+          name="offline_coverage_planner"
+          output="screen" />
+
+    <!-- Online obstacle-avoidance layer: subscribes /planned_path + /scan_multi,
+         publishes /desired_path with detours spliced in around persistent
+         obstacles. The path follower tracks /desired_path. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="local_replanner.py"
+          name="local_replanner"
+          output="screen" />
+
+    <!-- Path Follower (tracks /desired_path) -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="path_follower.py"
+          name="path_follower"
+          output="screen">
+        <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+    </node>
+
+    <!-- RViz -->
+    <group if="$(arg open_rviz)">
+        <node pkg="rviz" type="rviz" name="rviz" required="true"
+              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/boustrophedon_with_cones.rviz"/>
+    </group>
+</launch>
