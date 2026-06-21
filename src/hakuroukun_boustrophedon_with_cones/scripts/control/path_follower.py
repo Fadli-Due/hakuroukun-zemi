@@ -344,17 +344,32 @@ class PurePursuitNode:
 
     # ---- Steering while reversing ----
     def reverse_steering(self):
-        x, y, yaw = self.current_pose
-
-        # choose target "in front" of the reversed heading
-        Lp = self.lookahead_point(x, y, yaw + math.pi)
-        if Lp is None:
-            return 0.0
-
-        dx, dy = Lp[0] - x, Lp[1] - y
-        alpha_rev = self.wrap_pi(math.atan2(dy, dx) - (yaw + math.pi))
-        steer = math.atan2(2.0 * self.wheelbase * math.sin(alpha_rev), self.lookahead_dist)
-        return max(self.MIN_STEERING, min(self.MAX_STEERING, steer))
+        # FIX (2026-06-21, path_follower debug session): this used to call
+        # self.lookahead_point(x, y, yaw + math.pi) to find a "target behind
+        # the robot." That doesn't work -- lookahead_point() is a forward-
+        # path search: it only walks self.path_points forward from
+        # self.closest_i (toward wherever the route continues, i.e. toward
+        # the obstacle that just triggered the veto), and only accepts a
+        # candidate if it tests as "in front of" the queried heading. Points
+        # that are actually ahead on the route essentially never satisfy
+        # "behind the robot" once you flip yaw by pi, so the search fell
+        # through every fallback and frequently returned self.path_points[-1]
+        # (the literal end of the whole coverage route) as the "reverse
+        # target." That produced a large, essentially arbitrary alpha that
+        # saturated against MAX_STEERING -- coincidentally the same ceiling
+        # FORWARD mode was also saturating against while fighting the
+        # obstacle, which is why logs showed identical steer values in both
+        # FORWARD and REVERSE. With Ackermann steering, reversing at max
+        # wheel angle just retraces the mirrored arc of whatever FORWARD was
+        # doing, so net displacement per recovery cycle was ~0.
+        #
+        # REVERSE mode's actual job is just "open clearance from whatever
+        # tripped the veto," not "track the path backward." Centered
+        # steering while reversing translates the robot straight back along
+        # its current heading -- away from the obstacle -- which guarantees
+        # real distance gain regardless of path geometry, instead of
+        # depending on a search that was never designed to run backward.
+        return 0.0
 
 
 if __name__ == '__main__':
