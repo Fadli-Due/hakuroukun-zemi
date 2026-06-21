@@ -269,6 +269,26 @@ class LocalReplanner:
         each shift translates the array (cells leaving the window are dropped,
         new cells enter as zero = never seen). This keeps the grid local and
         cheap regardless of how big the static map is.
+
+        FIX (2026-06-21): this now shifts `obs_first` in lockstep with
+        `obs_grid`. Previously only obs_grid was translated -- obs_first kept
+        its old, now-misaligned contents, so after any recenter the "first
+        seen" timer for a physical obstacle location was desynced from the
+        live obs grid. In practice `newly_seen` (in _compute_persistent_mask)
+        fired again right after every recenter -- the box's cells looked
+        "never seen" at their new array indices even though they'd been
+        tracked for seconds under the old indices -- so persistence_threshold
+        could never be reached if recenters happened more often than
+        persistence_threshold seconds apart. A FORWARD/REVERSE recovery
+        oscillation pinned against an obstacle (especially with the known
+        reverse_steering() bug that reuses the forward steering angle and
+        causes arc retrace instead of a straight backup) can easily drift
+        the robot's odom position past the 1/4-window recenter threshold
+        repeatedly, even with near-zero net displacement per cycle.
+
+        A throwaway [lr-debug] log line is included below so we can confirm
+        whether this is actually firing during the stuck-at-obstacle test.
+        Remove it once the fix is verified.
         """
         if self.obs_grid is None or self.robot_xy is None:
             return
@@ -284,6 +304,9 @@ class LocalReplanner:
 
         with self.lock:
             new = np.zeros_like(self.obs_grid)
+            new_first = (np.zeros_like(self.obs_first)
+                         if getattr(self, "obs_first", None) is not None else None)
+
             # Copy overlap region from old grid into new grid (shifted).
             src_x0 = max(0, dx_cells)
             src_y0 = max(0, dy_cells)
@@ -296,7 +319,20 @@ class LocalReplanner:
             if src_x1 > src_x0 and src_y1 > src_y0:
                 new[dst_y0:dst_y1, dst_x0:dst_x1] = \
                     self.obs_grid[src_y0:src_y1, src_x0:src_x1]
+                if new_first is not None:
+                    new_first[dst_y0:dst_y1, dst_x0:dst_x1] = \
+                        self.obs_first[src_y0:src_y1, src_x0:src_x1]
+
+            # --- [lr-debug] diagnostic: confirm recenter frequency ---------
+            rospy.loginfo(
+                "[lr-debug] RECENTER fired: dx=%d dy=%d cells "
+                "(threshold=1/4 window=%.2fm)",
+                dx_cells, dy_cells, self.obs_grid_w * self.map_res / 4.0)
+            # -----------------------------------------------------------------
+
             self.obs_grid = new
+            if new_first is not None:
+                self.obs_first = new_first
             self.obs_ox = self.obs_ox + dx_cells * self.map_res
             self.obs_oy = self.obs_oy + dy_cells * self.map_res
 
@@ -322,22 +358,48 @@ class LocalReplanner:
         i_now = self._closest_path_index(self.current_path, self.robot_xy)
 
         # 3) Find the first blocked index ahead within lookahead_check_m.
+        #
+        #    IMPORTANT: once a detour is active, self.current_path IS the
+        #    detour -- it was built specifically to route around the
+        #    obstacle, so checking it for blockage will (correctly) always
+        #    come back clear and immediately look like "obstacle is gone".
+        #    That caused a detour-apply / baseline-restore flap every
+        #    ~0.5s (see local_replanner debug session, 2026-06-21): the
+        #    obstacle never actually moved, only the path being checked did.
+        #
+        #    So while a detour is active, check persistence against the
+        #    ORIGINAL baseline path instead -- that's the only path whose
+        #    "is the obstacle still here" status is meaningful. We still
+        #    track i_now on current_path (for splicing/backstep math), but
+        #    we evaluate blockage against baseline_path.
+        check_path = self.baseline_path if self.detour_active else self.current_path
+        i_now_baseline = (self._closest_path_index(self.baseline_path, self.robot_xy)
+                          if self.detour_active else i_now)
         i_block_start, i_block_end = self._find_blocked_span(
-            self.current_path, i_now, persistent_mask)
+            check_path, i_now_baseline, persistent_mask)
 
         if i_block_start is None:
-            # No persistent obstacle ahead. If a detour was active, attempt to
-            # restore the baseline (transition handled in restore).
+            # No persistent obstacle ahead on the relevant path. If a detour
+            # was active, it's now safe to restore the baseline.
             if self.detour_active:
                 self._maybe_restore_baseline(i_now)
         else:
             # 4) A blockage exists. Compute and splice a detour.
-            rospy.loginfo(
-                "[local_replanner] blockage on path [%d..%d] (robot at %d). "
-                "Computing detour.", i_block_start, i_block_end, i_now)
+            #    Skip if a detour is already active and still covers this
+            #    span -- avoids recomputing/resplicing every eval tick.
+            if self.detour_active:
+                rospy.logdebug_throttle(
+                    2.0,
+                    "[local_replanner] obstacle still blocks baseline "
+                    "[%d..%d] -- detour remains active.",
+                    i_block_start, i_block_end)
+            else:
+                rospy.loginfo(
+                    "[local_replanner] blockage on path [%d..%d] (robot at %d). "
+                    "Computing detour.", i_block_start, i_block_end, i_now)
 
-            self._compute_and_apply_detour(i_now, i_block_start, i_block_end,
-                                           persistent_mask)
+                self._compute_and_apply_detour(i_now, i_block_start, i_block_end,
+                                               persistent_mask)
 
         # 5) Publish visualization (always, so RViz sees the mask even when clear).
         self._publish_viz(persistent_mask)
@@ -345,35 +407,54 @@ class LocalReplanner:
     def _compute_persistent_mask(self, obs, now):
         """Return a bool mask of the obs grid where cells count as obstacles.
 
-        Approximation: a cell is treated as a real obstacle if it was last
-        seen within `clear_time` AND the time since `now - persistence_threshold`
-        the cell has been continuously stamped. Since we don't track first-seen,
-        we approximate: stamped recently (live) AND the timestamp is at least
-        `persistence_threshold` seconds in the past relative to a sliding
-        "established" line. In practice this means we test:
-            obs > 0 AND (now - obs) < clear_time AND obs has existed
-            long enough — see persistence_history below.
-        For simplicity and robustness in the first version, the rule is:
-            cell is obstacle if it has been stamped recently AND the
-            FIRST stamp is older than persistence_threshold seconds.
+        Two timers per cell:
+          * obs        — last time the cell was hit by LiDAR.
+          * obs_first  — first time the cell entered continuous tracking.
 
-        We track first-stamp times in `obs_first` (allocated lazily).
+        Decay rules (revised 2026-06-21 after the obstacle_grid stayed empty
+        even with the box physically in front of the robot):
+
+          * clear_time  = brief-gap tolerance for *live tracking*.
+                          A cell only counts as a persistent obstacle if it
+                          has been hit within clear_time. This is the fast
+                          path for "the obstacle just disappeared."
+
+          * persistence_reset_time = how long without ANY hit before we
+                          erase obs_first too (i.e. forget the cell's
+                          accumulated persistence). Must be MUCH longer
+                          than clear_time, otherwise any brief laser gap
+                          (e.g. a heading swing during REVERSE recovery)
+                          wipes seconds of accumulated persistence and
+                          the 7s threshold can never be reached.
+
+        Before this fix, both timers were tied to clear_time, so a 1s gap
+        in scans erased obs_first entirely. That made persistence near-
+        impossible to accumulate while the path_follower was oscillating.
+
+        NOTE: this timer logic only holds if obs_first stays spatially
+        aligned with obs across grid recenters -- see the fix in
+        _maybe_recenter_obs_grid above.
         """
         if not hasattr(self, "obs_first") or self.obs_first is None \
                 or self.obs_first.shape != obs.shape:
             self.obs_first = np.zeros_like(obs)
 
-        # Update first-seen: cells newly stamped (first ~= 0 but obs > 0) → set first = obs.
+        # First-seen: set the moment a cell becomes tracked.
         newly_seen = (obs > 0) & (self.obs_first == 0)
         self.obs_first[newly_seen] = obs[newly_seen]
 
-        # Cells that have decayed away (not seen for > clear_time): forget them.
-        decayed = (obs > 0) & ((now - obs) > self.clear_time)
-        if np.any(decayed):
-            obs[decayed] = 0.0
-            self.obs_first[decayed] = 0.0
+        # Fully forget a cell only after a long absence. clear_time alone
+        # is too aggressive — see docstring.
+        persistence_reset_time = max(self.clear_time * 5.0, 5.0)
+        fully_gone = (obs > 0) & ((now - obs) > persistence_reset_time)
+        if np.any(fully_gone):
+            obs[fully_gone] = 0.0
+            self.obs_first[fully_gone] = 0.0
 
-        # Persistent = first-seen long ago, AND still being stamped.
+        # Persistent = first-seen long enough ago AND still live.
+        # obs_first carries over brief gaps; "still live" still requires a
+        # recent hit within clear_time, so truly-cleared cells stop
+        # counting quickly even though obs_first lingers a bit longer.
         persistent = ((self.obs_first > 0) &
                       ((now - self.obs_first) >= self.persistence_threshold) &
                       ((now - obs) <= self.clear_time))

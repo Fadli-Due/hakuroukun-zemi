@@ -15,7 +15,7 @@ local_replanner:
 
   # A cell that has not been hit for this long is forgotten. Should be much
   # smaller than persistence_threshold; ~1s smooths over single-scan dropouts.
-  clear_time: 1.0
+  clear_time: 3.0
 
   # ---- local obstacle window -------------------------------------------------
   # Side length (m) of the obstacle grid window centred on the robot. Keep
