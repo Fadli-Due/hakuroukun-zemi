@@ -110,6 +110,12 @@ class LocalReplanner:
         self.obs_ox = 0.0
         self.obs_oy = 0.0
 
+        # Cached "free" boolean array from the last _build_astar_grid() call.
+        # Used by _compute_and_apply_detour() to validate backstep/rejoin
+        # against the actual occupancy A* will plan on, instead of guessing
+        # with a fixed offset (see 2026-06-21 debug session).
+        self._last_astar_free = None
+
         # ---- TF ------------------------------------------------------------
         self.tf_buf = tf2_ros.Buffer(cache_time=rospy.Duration(10.0))
         self.tf_lst = tf2_ros.TransformListener(self.tf_buf)
@@ -279,16 +285,7 @@ class LocalReplanner:
         "never seen" at their new array indices even though they'd been
         tracked for seconds under the old indices -- so persistence_threshold
         could never be reached if recenters happened more often than
-        persistence_threshold seconds apart. A FORWARD/REVERSE recovery
-        oscillation pinned against an obstacle (especially with the known
-        reverse_steering() bug that reuses the forward steering angle and
-        causes arc retrace instead of a straight backup) can easily drift
-        the robot's odom position past the 1/4-window recenter threshold
-        repeatedly, even with near-zero net displacement per cycle.
-
-        A throwaway [lr-debug] log line is included below so we can confirm
-        whether this is actually firing during the stuck-at-obstacle test.
-        Remove it once the fix is verified.
+        persistence_threshold seconds apart.
         """
         if self.obs_grid is None or self.robot_xy is None:
             return
@@ -416,20 +413,12 @@ class LocalReplanner:
 
           * clear_time  = brief-gap tolerance for *live tracking*.
                           A cell only counts as a persistent obstacle if it
-                          has been hit within clear_time. This is the fast
-                          path for "the obstacle just disappeared."
+                          has been hit within clear_time.
 
           * persistence_reset_time = how long without ANY hit before we
-                          erase obs_first too (i.e. forget the cell's
-                          accumulated persistence). Must be MUCH longer
-                          than clear_time, otherwise any brief laser gap
-                          (e.g. a heading swing during REVERSE recovery)
-                          wipes seconds of accumulated persistence and
-                          the 7s threshold can never be reached.
-
-        Before this fix, both timers were tied to clear_time, so a 1s gap
-        in scans erased obs_first entirely. That made persistence near-
-        impossible to accumulate while the path_follower was oscillating.
+                          erase obs_first too. Must be MUCH longer than
+                          clear_time, otherwise any brief laser gap wipes
+                          seconds of accumulated persistence.
 
         NOTE: this timer logic only holds if obs_first stays spatially
         aligned with obs across grid recenters -- see the fix in
@@ -443,8 +432,7 @@ class LocalReplanner:
         newly_seen = (obs > 0) & (self.obs_first == 0)
         self.obs_first[newly_seen] = obs[newly_seen]
 
-        # Fully forget a cell only after a long absence. clear_time alone
-        # is too aggressive — see docstring.
+        # Fully forget a cell only after a long absence.
         persistence_reset_time = max(self.clear_time * 5.0, 5.0)
         fully_gone = (obs > 0) & ((now - obs) > persistence_reset_time)
         if np.any(fully_gone):
@@ -452,9 +440,6 @@ class LocalReplanner:
             self.obs_first[fully_gone] = 0.0
 
         # Persistent = first-seen long enough ago AND still live.
-        # obs_first carries over brief gaps; "still live" still requires a
-        # recent hit within clear_time, so truly-cleared cells stop
-        # counting quickly even though obs_first lingers a bit longer.
         persistent = ((self.obs_first > 0) &
                       ((now - self.obs_first) >= self.persistence_threshold) &
                       ((now - obs) <= self.clear_time))
@@ -501,24 +486,67 @@ class LocalReplanner:
     # ====================================================================
     def _compute_and_apply_detour(self, i_now, i_block_start, i_block_end,
                                   persistent_mask):
-        """A* around the blocked span and splice into the path."""
+        """A* around the blocked span and splice into the path.
+
+        FIX (2026-06-21, second debug session): backstep and rejoin are now
+        validated against the actual A* occupancy grid we plan on, not a
+        fixed offset (backstep) or the raw uninflated mask (rejoin).
+
+        Previously: backstep = i_block_start - 5 = 1.0m before the block
+        (5 points * 0.20m densify). Coincidentally equal to obstacle_inflate_m
+        (= robot_radius = 1.0m by default), so the backstep landed almost
+        exactly on the inflation boundary -- frequently inside it after
+        grid rounding. A* then rejected the start with "Start cell is
+        occupied/unknown!" every eval tick. Rejoin had a walk-forward loop
+        but checked persistent_mask (raw cells) instead of the inflated grid,
+        so even rejoin's validation was looking at the wrong thing.
+
+        Now: build the A* grid first, cache its `free` boolean, then walk
+        backstep backward and rejoin forward against that same array until
+        each is genuinely free. Removes the 1.0m-vs-1.0m coincidence and
+        adapts to whatever inflation radius is actually in use.
+        """
         path = self.current_path
 
-        # Choose detour endpoints: small backstep before the block,
-        # rejoin a bit past the block to give clearance.
-        backstep = max(0, i_block_start - 5)
-        rejoin_steps = int(self.rejoin_margin_m / 0.20)
-        rejoin = min(len(path) - 1, i_block_end + rejoin_steps)
-
-        # Walk further forward until the rejoin point is itself clear of the
-        # mask (don't rejoin into an obstacle).
-        while rejoin < len(path) - 1 and self._point_in_mask(
-                path[rejoin][0], path[rejoin][1], persistent_mask):
-            rejoin += 1
-
-        # Build the inflated A* grid: static_inflated AND-NOT persistent_obs.
+        # Build the inflated A* grid FIRST so we can validate endpoints
+        # against the same occupancy A* will plan on.
         astar_grid = self._build_astar_grid(persistent_mask)
         if astar_grid is None:
+            return
+
+        free = self._last_astar_free
+        if free is None:
+            rospy.logwarn("[local_replanner] no cached free grid -- skipping detour.")
+            return
+
+        def _is_free(idx):
+            x, y = path[idx]
+            gx = int(round((x - self.map_ox) / self.map_res))
+            gy = int(round((y - self.map_oy) / self.map_res))
+            if gx < 0 or gx >= self.map_w or gy < 0 or gy >= self.map_h:
+                return False
+            return bool(free[gy, gx])
+
+        # Backstep: start at i_block_start - 5 and walk BACKWARD until we
+        # find a cell that's genuinely free of inflated obstacles.
+        backstep = max(0, i_block_start - 5)
+        while backstep > 0 and not _is_free(backstep):
+            backstep -= 1
+
+        # Rejoin: start rejoin_margin past the block and walk FORWARD until
+        # we find a cell that's genuinely free.
+        rejoin_steps = int(self.rejoin_margin_m / 0.20)
+        rejoin = min(len(path) - 1, i_block_end + rejoin_steps)
+        while rejoin < len(path) - 1 and not _is_free(rejoin):
+            rejoin += 1
+
+        # If we walked off either end without finding a free cell, give up
+        # cleanly -- A* would fail anyway and reflex-stop keeps us safe.
+        if not _is_free(backstep) or not _is_free(rejoin):
+            rospy.logwarn(
+                "[local_replanner] could not find free backstep/rejoin "
+                "(backstep=%d free=%s, rejoin=%d free=%s) -- holding path.",
+                backstep, _is_free(backstep), rejoin, _is_free(rejoin))
             return
 
         p_start = path[backstep]
@@ -565,7 +593,12 @@ class LocalReplanner:
 
     def _build_astar_grid(self, persistent_mask):
         """Build a SimpleOccupancyGrid combining the inflated static map with
-        the inflated persistent obstacles. Both are inflated by robot_radius."""
+        the inflated persistent obstacles. Both are inflated by robot_radius.
+
+        Also caches the final `free` boolean array on self._last_astar_free
+        so _compute_and_apply_detour() can validate its backstep/rejoin
+        endpoints against the same occupancy A* plans on.
+        """
         if self.static_inflated is None:
             return None
 
@@ -594,6 +627,9 @@ class LocalReplanner:
             sy0 = y0 - oy_cells; sy1 = sy0 + (y1 - y0)
             if x1 > x0 and y1 > y0:
                 free[y0:y1, x0:x1] &= ~inflated_obs_blocked[sy0:sy1, sx0:sx1]
+
+        # Cache for endpoint validation in _compute_and_apply_detour.
+        self._last_astar_free = free
 
         data = np.where(free, 0, 100).astype(np.int16).reshape(-1).tolist()
         return SimpleOccupancyGrid(
