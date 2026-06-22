@@ -43,6 +43,18 @@ class PurePursuitNode:
         self.cooldown_until = 0.0
         self.rev_cooldown = rp.get("cooldown", 3.0)   # seconds
 
+        # ========== HOLD-mode parameters (2026-06-22) ==========
+        # When the robot detects an obstacle ahead it now enters HOLD instead
+        # of immediately reversing. Staying stationary lets the replanner's
+        # persistence timer accumulate cleanly (the obs_grid stops shifting
+        # under recentering) so a detour can fire within persistence_threshold
+        # seconds. Once a new path arrives, the robot reverses briefly to
+        # clear the obstacle, then follows the new (detour-spliced) path.
+        self.max_hold_time = rp.get("max_hold_time", 15.0)
+        self.hold_start = None
+        self.hold_entry_path_version = 0
+        self.path_version = 0
+
         # extra tuning params
         self.goal_tol = rospy.get_param(f"{pp_ns}/goal_tolerance", 0.4)
         self.steer_lpf = rospy.get_param(f"{pp_ns}/steer_lpf", 0.35)  # weight on previous
@@ -125,6 +137,10 @@ class PurePursuitNode:
                             for p in msg.poses]
         self.closest_i = 0
         self.path_available = bool(self.path_points)
+        # Bump on every new path. The HOLD state watches this to detect that
+        # the replanner has spliced in a detour, which is the cue to reverse
+        # briefly and start following the new route.
+        self.path_version += 1
 
     def scan_cb(self, msg):
         n = len(msg.ranges)
@@ -167,7 +183,11 @@ class PurePursuitNode:
 
             # Normal PP — compute desired forward command
             v_fwd, steer_fwd = self.compute_pp()
-            now = time.time()
+            # ROS sim time so timers stay in lockstep with the replanner's
+            # persistence_threshold (which uses rospy.Time). With wall-clock
+            # time.time(), HOLD could time out before persistence had even
+            # accumulated — observed 2026-06-22 when sim ran at ~50% real.
+            now = rospy.Time.now().to_sec()
 
             # Net displacement over the stuck window (immune to jitter)
             if len(self.pose_hist) >= 2:
@@ -187,23 +207,65 @@ class PurePursuitNode:
                 self.stuck_start = None
             stuck_dur = 0.0 if self.stuck_start is None else (now - self.stuck_start)
 
-            # Trigger reverse when:
-            #  A) stuck for a while, OR
-            #  B) front is blocked AND (stuck a bit OR heading is bad), OR
-            #  C) something is dangerously close — back up immediately
+            # ── Triggers ─────────────────────────────────────────────────
+            # NEW (2026-06-22): obstacle imminent → HOLD (stop, wait for the
+            # replanner). The robot used to reverse the moment min_front
+            # dropped under 0.45, but that kept moving the LiDAR window and
+            # prevented persistence from accumulating cleanly, so a detour
+            # could never fire. Holding stationary lets persistence build up.
+            want_hold = (self.min_front < 0.45)
+
+            # Legacy stuck-recovery: only fires when the robot is stuck WITHOUT
+            # an immediate obstacle in front (e.g. U-turn binding, steering
+            # geometry edge case). Obstacles are now handled by want_hold.
             want_recover_reverse = (
                 (stuck_dur > self.stuck_time) or
-                ((self.min_front < self.front_stop) and (stuck_dur > 0.3 or heading_bad)) or
-                (self.min_front < 0.45)
+                ((self.min_front < self.front_stop) and
+                 (stuck_dur > 0.3 or heading_bad))
             )
 
-            # FSM with cooldown to prevent oscillation
+            # ── FSM with cooldown to prevent oscillation ────────────────
             if self.mode == "FORWARD":
-                if self.rev_enable and (now > self.cooldown_until) and want_recover_reverse:
+                if want_hold:
+                    self.mode = "HOLD"
+                    self.hold_start = now
+                    self.hold_entry_path_version = self.path_version
+                    self.stuck_start = None
+                    rospy.loginfo(
+                        f"MODE → HOLD (obstacle ahead) min_front={self.min_front:.2f} "
+                        f"— waiting for replanner (max {self.max_hold_time:.0f}s)")
+                elif self.rev_enable and (now > self.cooldown_until) and want_recover_reverse:
                     self.mode = "REVERSE"
                     self.rev_start = now
                     rospy.loginfo(f"MODE → REVERSE (recover) front={self.min_front:.2f} "
                                 f"stuck={stuck_dur:.2f} heading_bad={heading_bad}")
+
+            elif self.mode == "HOLD":
+                hold_dur = now - (self.hold_start if self.hold_start is not None else now)
+                # A) New path arrived — replanner did its job, time to clear
+                #    space by reversing, then follow the new (detoured) path.
+                if self.path_version > self.hold_entry_path_version:
+                    self.mode = "REVERSE"
+                    self.rev_start = now
+                    rospy.loginfo(
+                        f"MODE → REVERSE (new path received, clearing space) "
+                        f"hold_dur={hold_dur:.1f}s")
+                # B) Held too long with no detour — fall back to legacy reverse
+                #    so the robot at least tries something.
+                elif hold_dur > self.max_hold_time:
+                    self.mode = "REVERSE"
+                    self.rev_start = now
+                    rospy.logwarn(
+                        f"MODE → REVERSE (HOLD timed out at {self.max_hold_time:.0f}s "
+                        f"with no new path — replanner may have failed)")
+                # C) Obstacle cleared on its own (pedestrian walked away).
+                elif self.min_front > self.front_clear:
+                    self.mode = "FORWARD"
+                    self.stuck_start = None
+                    rospy.loginfo(
+                        f"MODE → FORWARD (obstacle cleared during hold, "
+                        f"hold_dur={hold_dur:.1f}s)")
+
             else:  # REVERSE
                 duration = now - (self.rev_start if self.rev_start is not None else now)
 
@@ -214,10 +276,13 @@ class PurePursuitNode:
                     self.stuck_start = None
                     rospy.loginfo("MODE → FORWARD (recovered)")
 
-            # Command selection
+            # ── Command selection ───────────────────────────────────────
             if self.mode == "REVERSE":
                 v = -self.rev_speed
                 steer = self.reverse_steering()
+            elif self.mode == "HOLD":
+                v = 0.0
+                steer = 0.0
             else:
                 v, steer = v_fwd, steer_fwd
 
