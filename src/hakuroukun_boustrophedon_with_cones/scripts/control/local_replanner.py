@@ -109,6 +109,13 @@ class LocalReplanner:
         # Origin of obs_grid in map frame; updated as robot moves.
         self.obs_ox = 0.0
         self.obs_oy = 0.0
+        # FIX (2026-06-22): guard so the first recenter snaps obs_ox/obs_oy
+        # directly to the robot's actual position rather than shifting from
+        # (0.0, 0.0). Without this, the first recenter can be a full window-
+        # width shift (~75 cells = 15m in conemap world), which wipes the
+        # entire obs_grid and obs_first arrays (zero overlap region) and
+        # triggers a spurious "obstacle cleared" mid-detour.
+        self._obs_grid_origin_initialized = False
 
         # Cached "free" boolean array from the last _build_astar_grid() call.
         # Used by _compute_and_apply_detour() to validate backstep/rejoin
@@ -290,6 +297,22 @@ class LocalReplanner:
         if self.obs_grid is None or self.robot_xy is None:
             return
         half = (self.obs_grid_w * self.map_res) / 2.0
+
+        # FIX (2026-06-22): on the very first call, snap the origin directly
+        # to the robot's current position without doing any shift logic.
+        # obs_ox/obs_oy start at (0.0, 0.0) but the robot spawns far from the
+        # map origin in the conemap world, so the first "shift" would be a
+        # full window-width displacement that wipes the entire grid.
+        if not self._obs_grid_origin_initialized:
+            with self.lock:
+                self.obs_ox = self.robot_xy[0] - half
+                self.obs_oy = self.robot_xy[1] - half
+                self._obs_grid_origin_initialized = True
+            rospy.loginfo(
+                "[local_replanner] obs_grid origin snapped to robot position "
+                "(%.2f, %.2f)", self.obs_ox, self.obs_oy)
+            return
+
         # Desired bottom-left so the robot sits at the centre.
         desired_ox = self.robot_xy[0] - half
         desired_oy = self.robot_xy[1] - half
