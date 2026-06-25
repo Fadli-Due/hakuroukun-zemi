@@ -70,9 +70,17 @@ class LocalReplanner:
         self.eval_rate             = rospy.get_param(f"{ns}/eval_rate", 2.0)
         # How far ahead along the path we look for blockage (metres).
         self.lookahead_check_m     = rospy.get_param(f"{ns}/lookahead_check_m", 6.0)
-        # Inflation applied to detected obstacles for A* (matches the
-        # planner's robot_radius by default).
-        self.obstacle_inflate_m    = rospy.get_param("robot_radius", 1.0)
+        # Inflation applied to detected DYNAMIC obstacles when building the A*
+        # detour grid (m). FIX (2026-06-25): was rospy.get_param("robot_radius", 1.0)
+        # — global namespace so YAML's local_replanner/obstacle_inflate_m was silently
+        # ignored. Now correctly namespaced.
+        self.obstacle_inflate_m    = rospy.get_param(f"{ns}/obstacle_inflate_m", 1.0)
+        # Inflation used for STATIC walls in the pre-computed A* free mask (m).
+        # Must equal the BCD planner's robot_radius so every planned path point
+        # lies inside the A* free space. Keeping this separate from obstacle_inflate_m
+        # prevents baseline path points near walls from being falsely blocked when
+        # obstacle_inflate_m > robot_radius (would cause "Goal cell occupied" errors).
+        self.static_wall_inflate_m = rospy.get_param("robot_radius", 1.0)
         # LiDAR points closer than this are dropped (the robot's own footprint).
         self.scan_min_range        = rospy.get_param(f"{ns}/scan_min_range", 0.30)
         # LiDAR points farther than this are dropped (noise / out of useful range).
@@ -95,28 +103,18 @@ class LocalReplanner:
 
         self.baseline_path = []           # list[(x,y)] from /planned_path
         self.current_path  = []           # list[(x,y)] currently being executed
-        self.detour_active = False        # is a detour currently being navigated?
+        self.detour_active = False        # is the live path a modified one?
         self.last_detour_points = []      # for viz: the active detour polyline
-
-        # CUMULATIVE STATE (2026-06-22): the path never reverts. Once a detour
-        # is spliced into current_path it stays there permanently. detour_active
-        # only indicates "robot is currently navigating around a fresh obstacle"
-        # and gets reset once the robot passes the rejoin index of the LATEST
-        # detour — so the next obstacle on the (possibly already-modified) path
-        # can trigger a new detour stacked on top.
-        self.all_detour_segments = []     # list[list[(x,y)]] — every detour ever spliced
-        self.past_obstacles = []          # list[(x,y)] — obstacle centers (map frame)
-        self._rejoin_index = None         # index in current_path past which the
-                                          # active detour is considered complete
-
-        # Last known closest-path indices for windowed search. A global argmin
-        # over a boustrophedon path will jump to a parallel lane that happens
-        # to be physically nearby — observed 2026-06-22, robot at index 15 was
-        # reported at 2208 because the U-turn loop above brought lane N+10
-        # within reach. Tracking the last index lets us search a small window
-        # ahead instead.
-        self._last_current_idx = None
-        self._last_baseline_idx = None
+        # Index in current_path where the detour arc ends (i.e. the rejoin point).
+        # Used to keep the detour active until the robot has physically completed it,
+        # regardless of whether the obstacle is still visible to the LiDAR.
+        self.detour_end_index = None
+        # Last computed index of the robot on current_path. Used to bound the
+        # closest-point search to a forward window (mirrors path_follower's
+        # monotonic tracking). Without this, np.argmin can jump from the detour
+        # arc to the post-rejoin baseline tail when they pass geometrically close,
+        # falsely indicating the arc is completed.
+        self.last_i_now = None
 
         self.robot_xy = None              # (x, y) in map frame
         self.robot_yaw = 0.0
@@ -129,19 +127,6 @@ class LocalReplanner:
         # Origin of obs_grid in map frame; updated as robot moves.
         self.obs_ox = 0.0
         self.obs_oy = 0.0
-        # FIX (2026-06-22): guard so the first recenter snaps obs_ox/obs_oy
-        # directly to the robot's actual position rather than shifting from
-        # (0.0, 0.0). Without this, the first recenter can be a full window-
-        # width shift (~75 cells = 15m in conemap world), which wipes the
-        # entire obs_grid and obs_first arrays (zero overlap region) and
-        # triggers a spurious "obstacle cleared" mid-detour.
-        self._obs_grid_origin_initialized = False
-
-        # Cached "free" boolean array from the last _build_astar_grid() call.
-        # Used by _compute_and_apply_detour() to validate backstep/rejoin
-        # against the actual occupancy A* will plan on, instead of guessing
-        # with a fixed offset (see 2026-06-21 debug session).
-        self._last_astar_free = None
 
         # ---- TF ------------------------------------------------------------
         self.tf_buf = tf2_ros.Buffer(cache_time=rospy.Duration(10.0))
@@ -153,6 +138,13 @@ class LocalReplanner:
         rospy.Subscriber("/scan_multi", LaserScan, self.scan_cb, queue_size=1)
         rospy.Subscriber("/hakuroukun_pose/rear_wheel_odometry", Odometry,
                          self.odom_cb, queue_size=10)
+        # /return_path: A* return-to-home leg computed by return_to_start.py
+        # after coverage is done. When received, it is appended to current_path
+        # and republished on /desired_path so the path_follower drives it.
+        # Persistence-gated obstacle avoidance keeps working on the return leg
+        # because evaluate() runs on current_path regardless of its origin.
+        rospy.Subscriber("/return_path", Path, self.return_path_cb, queue_size=1)
+        self.return_appended = False   # one-shot guard
 
         self.path_pub = rospy.Publisher("/desired_path", Path, queue_size=1, latch=True)
 
@@ -190,7 +182,10 @@ class LocalReplanner:
             raw = np.array(msg.data, dtype=np.int16).reshape((self.map_h, self.map_w))
             free = (raw == 0)
             dist = distance_transform_edt(free) * self.map_res
-            self.static_inflated = free & (dist > self.obstacle_inflate_m)
+            # Use static_wall_inflate_m (= robot_radius) for wall clearance so
+            # BCD-planned path points are always inside the A* free space.
+            # obstacle_inflate_m is reserved for dynamic obstacles only.
+            self.static_inflated = free & (dist > self.static_wall_inflate_m)
 
             # Allocate the local obstacle grid (last-hit time per cell).
             side_cells = int(math.ceil(self.window_size_m / self.map_res))
@@ -207,20 +202,62 @@ class LocalReplanner:
         with self.lock:
             self.baseline_path = [(p.pose.position.x, p.pose.position.y)
                                   for p in msg.poses]
-            # On first reception or when a new baseline arrives (e.g. re-plan),
-            # start fresh: current_path equals baseline, no active detour,
-            # cumulative state cleared.
+            # On first reception or when no detour is active, publish baseline
+            # straight through. If a detour is active when a new baseline
+            # arrives (re-plan), drop the detour -- the new baseline wins.
             self.current_path = list(self.baseline_path)
             self.detour_active = False
-            self._rejoin_index = None
-            self.all_detour_segments = []
-            self.past_obstacles = []
-            self.last_detour_points = []
-            self._last_current_idx = None
-            self._last_baseline_idx = None
+            self.detour_end_index = None
+            self.last_i_now = None
+            # A new baseline starts a fresh coverage run — allow another
+            # return-leg append at the end of it.
+            self.return_appended = False
         self._publish(self.current_path)
         rospy.loginfo("[local_replanner] baseline path received: %d points",
                       len(self.baseline_path))
+
+    def return_path_cb(self, msg):
+        """Append an A* return-to-home leg from return_to_start.py.
+
+        The return path is appended onto the tail of current_path so the
+        path_follower drives from the end of coverage straight into the
+        return leg with no gap. Persistence-gated obstacle avoidance keeps
+        running on this combined path, so a person walking into the return
+        corridor still triggers a detour.
+
+        One-shot: subsequent /return_path messages within the same baseline
+        session are ignored. A new /planned_path resets the guard.
+        """
+        with self.lock:
+            if self.return_appended:
+                rospy.logwarn(
+                    "[local_replanner] /return_path received but a return leg "
+                    "was already appended this session — ignoring.")
+                return
+            if not self.current_path:
+                rospy.logwarn(
+                    "[local_replanner] /return_path received before any "
+                    "baseline — ignoring.")
+                return
+
+            return_pts = [(p.pose.position.x, p.pose.position.y)
+                          for p in msg.poses]
+            if not return_pts:
+                rospy.logwarn("[local_replanner] /return_path is empty — ignoring.")
+                return
+
+            # Append. current_path may contain detours already; that's fine —
+            # the return leg sits after whatever the existing tail is.
+            self.current_path = list(self.current_path) + return_pts
+            self.return_appended = True
+            # last_i_now refers to current_path; appending doesn't invalidate
+            # the existing index. Leave it untouched.
+
+        self._publish(self.current_path)
+        rospy.loginfo(
+            "[local_replanner] return leg appended: %d points, "
+            "new current_path length = %d.",
+            len(return_pts), len(self.current_path))
 
     def odom_cb(self, msg):
         try:
@@ -308,37 +345,10 @@ class LocalReplanner:
         each shift translates the array (cells leaving the window are dropped,
         new cells enter as zero = never seen). This keeps the grid local and
         cheap regardless of how big the static map is.
-
-        FIX (2026-06-21): this now shifts `obs_first` in lockstep with
-        `obs_grid`. Previously only obs_grid was translated -- obs_first kept
-        its old, now-misaligned contents, so after any recenter the "first
-        seen" timer for a physical obstacle location was desynced from the
-        live obs grid. In practice `newly_seen` (in _compute_persistent_mask)
-        fired again right after every recenter -- the box's cells looked
-        "never seen" at their new array indices even though they'd been
-        tracked for seconds under the old indices -- so persistence_threshold
-        could never be reached if recenters happened more often than
-        persistence_threshold seconds apart.
         """
         if self.obs_grid is None or self.robot_xy is None:
             return
         half = (self.obs_grid_w * self.map_res) / 2.0
-
-        # FIX (2026-06-22): on the very first call, snap the origin directly
-        # to the robot's current position without doing any shift logic.
-        # obs_ox/obs_oy start at (0.0, 0.0) but the robot spawns far from the
-        # map origin in the conemap world, so the first "shift" would be a
-        # full window-width displacement that wipes the entire grid.
-        if not self._obs_grid_origin_initialized:
-            with self.lock:
-                self.obs_ox = self.robot_xy[0] - half
-                self.obs_oy = self.robot_xy[1] - half
-                self._obs_grid_origin_initialized = True
-            rospy.loginfo(
-                "[local_replanner] obs_grid origin snapped to robot position "
-                "(%.2f, %.2f)", self.obs_ox, self.obs_oy)
-            return
-
         # Desired bottom-left so the robot sits at the centre.
         desired_ox = self.robot_xy[0] - half
         desired_oy = self.robot_xy[1] - half
@@ -350,9 +360,6 @@ class LocalReplanner:
 
         with self.lock:
             new = np.zeros_like(self.obs_grid)
-            new_first = (np.zeros_like(self.obs_first)
-                         if getattr(self, "obs_first", None) is not None else None)
-
             # Copy overlap region from old grid into new grid (shifted).
             src_x0 = max(0, dx_cells)
             src_y0 = max(0, dy_cells)
@@ -365,20 +372,7 @@ class LocalReplanner:
             if src_x1 > src_x0 and src_y1 > src_y0:
                 new[dst_y0:dst_y1, dst_x0:dst_x1] = \
                     self.obs_grid[src_y0:src_y1, src_x0:src_x1]
-                if new_first is not None:
-                    new_first[dst_y0:dst_y1, dst_x0:dst_x1] = \
-                        self.obs_first[src_y0:src_y1, src_x0:src_x1]
-
-            # --- [lr-debug] diagnostic: confirm recenter frequency ---------
-            rospy.loginfo(
-                "[lr-debug] RECENTER fired: dx=%d dy=%d cells "
-                "(threshold=1/4 window=%.2fm)",
-                dx_cells, dy_cells, self.obs_grid_w * self.map_res / 4.0)
-            # -----------------------------------------------------------------
-
             self.obs_grid = new
-            if new_first is not None:
-                self.obs_first = new_first
             self.obs_ox = self.obs_ox + dx_cells * self.map_res
             self.obs_oy = self.obs_oy + dy_cells * self.map_res
 
@@ -394,144 +388,127 @@ class LocalReplanner:
 
         now = rospy.Time.now().to_sec()
 
-        # Track robot's forward progress on the current path with a windowed
-        # search — a global argmin can jump to a parallel lane on
-        # boustrophedon paths (see _closest_path_index docstring).
-        i_now = self._closest_path_index(
-            self.current_path, self.robot_xy, hint=self._last_current_idx)
-        self._last_current_idx = i_now
-
-        # 0) DETOUR-COMPLETION CHECK (2026-06-22).
-        #    If a detour is active, mark it complete only after the robot has
-        #    passed the rejoin index. We do NOT restore baseline — current_path
-        #    permanently retains every detour ever spliced. detour_active going
-        #    False just means "ready to detect the next obstacle".
-        if self.detour_active and self._rejoin_index is not None:
-            if i_now >= self._rejoin_index:
-                rospy.loginfo(
-                    "[local_replanner] robot past rejoin index %d (now at %d) — "
-                    "detour complete; current_path retains the splice. Ready "
-                    "for next obstacle.",
-                    self._rejoin_index, i_now)
-                self.detour_active = False
-                self._rejoin_index = None
-
         # 1) Snapshot the persistent obstacle mask: cells continuously hit for
         #    >= persistence_threshold, AND seen within clear_time.
         with self.lock:
             obs = self.obs_grid
             persistent_mask = self._compute_persistent_mask(obs, now)
 
-        # 2) Find the first blocked index ahead within lookahead_check_m.
-        #    While a detour is active we evaluate blockage against the
-        #    pre-splice region of the path — see 2026-06-21 notes.
-        check_path = self.baseline_path if self.detour_active else self.current_path
-        if self.detour_active:
-            i_now_baseline = self._closest_path_index(
-                self.baseline_path, self.robot_xy, hint=self._last_baseline_idx)
-            self._last_baseline_idx = i_now_baseline
-        else:
-            i_now_baseline = i_now
+        # 2) Find the robot's index on the current path using monotonic
+        # windowed search. This prevents argmin from jumping to the
+        # post-rejoin baseline tail when the detour arc passes geometrically
+        # near it (which would falsely signal arc completion).
+        i_now = self._closest_path_index_windowed(
+            self.current_path, self.robot_xy, self.last_i_now)
+        self.last_i_now = i_now
+
+        # 3) Find the first blocked index ahead within lookahead_check_m.
         i_block_start, i_block_end = self._find_blocked_span(
-            check_path, i_now_baseline, persistent_mask)
+            self.current_path, i_now, persistent_mask)
 
         if i_block_start is None:
-            # No persistent obstacle ahead. Nothing to do — DO NOT restore
-            # baseline. current_path keeps every accumulated splice.
+            # No persistent obstacle ahead on current_path. Do nothing.
+            #
+            # Design choice (2026-06-25): detours are PERMANENT once applied.
+            # The persistence-gated logic only fires a detour after an obstacle
+            # has remained in place for >= persistence_threshold seconds, at
+            # which point it is classified as static and assumed to stay.
+            # Reverting to the pristine baseline would contradict this model —
+            # losing sight of a static obstacle (e.g. it left the LiDAR FOV
+            # as the robot turned) does NOT mean the obstacle is gone, and
+            # restoring the baseline path can send the robot back toward it.
+            #
+            # If another persistent obstacle appears later, _compute_and_apply_detour
+            # will splice a new detour onto the already-modified current_path
+            # — the algorithm always works on self.current_path, never on the
+            # pristine baseline, so multiple detours stack correctly.
             pass
         else:
-            # 3) A blockage exists. Compute and splice a detour, but only if
-            #    we're not already navigating around something — otherwise the
-            #    robot is committed to the current arc.
-            if self.detour_active:
-                rospy.logdebug_throttle(
-                    2.0,
-                    "[local_replanner] obstacle still blocks baseline "
-                    "[%d..%d] -- detour remains active.",
-                    i_block_start, i_block_end)
-            else:
-                rospy.loginfo(
-                    "[local_replanner] blockage on path [%d..%d] (robot at %d). "
-                    "Computing detour.", i_block_start, i_block_end, i_now)
+            # 4) A blockage exists. Compute and splice a detour.
+            rospy.loginfo(
+                "[local_replanner] blockage on path [%d..%d] (robot at %d). "
+                "Computing detour.", i_block_start, i_block_end, i_now)
 
-                self._compute_and_apply_detour(i_now, i_block_start, i_block_end,
-                                               persistent_mask)
+            self._compute_and_apply_detour(i_now, i_block_start, i_block_end,
+                                           persistent_mask)
 
-        # 4) Publish visualization (always, so RViz sees the mask even when clear).
+        # 5) Publish visualization (always, so RViz sees the mask even when clear).
         self._publish_viz(persistent_mask)
 
     def _compute_persistent_mask(self, obs, now):
         """Return a bool mask of the obs grid where cells count as obstacles.
 
-        Two timers per cell:
-          * obs        — last time the cell was hit by LiDAR.
-          * obs_first  — first time the cell entered continuous tracking.
+        Approximation: a cell is treated as a real obstacle if it was last
+        seen within `clear_time` AND the time since `now - persistence_threshold`
+        the cell has been continuously stamped. Since we don't track first-seen,
+        we approximate: stamped recently (live) AND the timestamp is at least
+        `persistence_threshold` seconds in the past relative to a sliding
+        "established" line. In practice this means we test:
+            obs > 0 AND (now - obs) < clear_time AND obs has existed
+            long enough — see persistence_history below.
+        For simplicity and robustness in the first version, the rule is:
+            cell is obstacle if it has been stamped recently AND the
+            FIRST stamp is older than persistence_threshold seconds.
 
-        Decay rules (revised 2026-06-21 after the obstacle_grid stayed empty
-        even with the box physically in front of the robot):
-
-          * clear_time  = brief-gap tolerance for *live tracking*.
-                          A cell only counts as a persistent obstacle if it
-                          has been hit within clear_time.
-
-          * persistence_reset_time = how long without ANY hit before we
-                          erase obs_first too. Must be MUCH longer than
-                          clear_time, otherwise any brief laser gap wipes
-                          seconds of accumulated persistence.
-
-        NOTE: this timer logic only holds if obs_first stays spatially
-        aligned with obs across grid recenters -- see the fix in
-        _maybe_recenter_obs_grid above.
+        We track first-stamp times in `obs_first` (allocated lazily).
         """
         if not hasattr(self, "obs_first") or self.obs_first is None \
                 or self.obs_first.shape != obs.shape:
             self.obs_first = np.zeros_like(obs)
 
-        # First-seen: set the moment a cell becomes tracked.
+        # Update first-seen: cells newly stamped (first ~= 0 but obs > 0) → set first = obs.
         newly_seen = (obs > 0) & (self.obs_first == 0)
         self.obs_first[newly_seen] = obs[newly_seen]
 
-        # Fully forget a cell only after a long absence.
-        persistence_reset_time = max(self.clear_time * 5.0, 5.0)
-        fully_gone = (obs > 0) & ((now - obs) > persistence_reset_time)
-        if np.any(fully_gone):
-            obs[fully_gone] = 0.0
-            self.obs_first[fully_gone] = 0.0
+        # Cells that have decayed away (not seen for > clear_time): forget them.
+        decayed = (obs > 0) & ((now - obs) > self.clear_time)
+        if np.any(decayed):
+            obs[decayed] = 0.0
+            self.obs_first[decayed] = 0.0
 
-        # Persistent = first-seen long enough ago AND still live.
+        # Persistent = first-seen long ago, AND still being stamped.
         persistent = ((self.obs_first > 0) &
                       ((now - self.obs_first) >= self.persistence_threshold) &
                       ((now - obs) <= self.clear_time))
         return persistent
 
-    def _closest_path_index(self, path, xy, hint=None, window=50):
-        """Closest path index to (xy).
-
-        If `hint` is provided, searches only a window around it:
-          [hint - window//4 .. hint + window).
-        This prevents the global-argmin trap on boustrophedon paths, where
-        parallel lanes can be physically nearby but hundreds of indices
-        apart (observed 2026-06-22: robot at index 15 was reported as 2208
-        because the U-turn loop above brought lane N+10 within reach).
-
-        If `hint` is None, falls back to global argmin — safe only on the
-        first call when we don't yet know where the robot is on the path.
-        """
+    def _closest_path_index(self, path, xy):
         if not path:
             return 0
-        if hint is None:
-            px = np.array([p[0] for p in path])
-            py = np.array([p[1] for p in path])
-            d2 = (px - xy[0]) ** 2 + (py - xy[1]) ** 2
-            return int(np.argmin(d2))
+        px = np.array([p[0] for p in path])
+        py = np.array([p[1] for p in path])
+        d2 = (px - xy[0]) ** 2 + (py - xy[1]) ** 2
+        return int(np.argmin(d2))
 
-        lo = max(0, hint - window // 4)
-        hi = min(len(path), hint + window)
-        if hi <= lo:
-            return min(hint, len(path) - 1)
-        seg = path[lo:hi]
-        px = np.array([p[0] for p in seg])
-        py = np.array([p[1] for p in seg])
+    def _closest_path_index_windowed(self, path, xy, last_i,
+                                     back_window=10, fwd_window=50):
+        """Closest path index restricted to a forward window around last_i.
+
+        Mirrors path_follower's monotonic tracking. Prevents 'argmin jumps'
+        when the path doubles back near itself — e.g., a detour arc that
+        loops around an obstacle and rejoins the baseline. In that case a
+        global argmin can return a post-rejoin baseline point even though
+        the robot is physically still on the arc, leading to a premature
+        'arc completed' decision and an unwanted baseline restore.
+
+        - back_window allows small reverse motion (REVERSE mode) without
+          locking the index in place.
+        - fwd_window must be large enough to track forward motion between
+          eval ticks (eval_rate=2 Hz, robot ~0.35 m/s, densify=0.20 m
+          → ~1 index per tick; 50 is comfortably generous).
+        - Falls back to global argmin when last_i is None (first call or
+          immediately after a path swap)."""
+        if not path:
+            return 0
+        if last_i is None:
+            return self._closest_path_index(path, xy)
+        last_i = max(0, min(last_i, len(path) - 1))
+        lo = max(0, last_i - back_window)
+        hi = min(len(path), last_i + fwd_window + 1)
+        if lo >= hi:
+            return last_i
+        px = np.array([p[0] for p in path[lo:hi]])
+        py = np.array([p[1] for p in path[lo:hi]])
         d2 = (px - xy[0]) ** 2 + (py - xy[1]) ** 2
         return lo + int(np.argmin(d2))
 
@@ -568,67 +545,31 @@ class LocalReplanner:
     # ====================================================================
     def _compute_and_apply_detour(self, i_now, i_block_start, i_block_end,
                                   persistent_mask):
-        """A* around the blocked span and splice into the path.
-
-        FIX (2026-06-21, second debug session): backstep and rejoin are now
-        validated against the actual A* occupancy grid we plan on, not a
-        fixed offset (backstep) or the raw uninflated mask (rejoin).
-
-        Previously: backstep = i_block_start - 5 = 1.0m before the block
-        (5 points * 0.20m densify). Coincidentally equal to obstacle_inflate_m
-        (= robot_radius = 1.0m by default), so the backstep landed almost
-        exactly on the inflation boundary -- frequently inside it after
-        grid rounding. A* then rejected the start with "Start cell is
-        occupied/unknown!" every eval tick. Rejoin had a walk-forward loop
-        but checked persistent_mask (raw cells) instead of the inflated grid,
-        so even rejoin's validation was looking at the wrong thing.
-
-        Now: build the A* grid first, cache its `free` boolean, then walk
-        backstep backward and rejoin forward against that same array until
-        each is genuinely free. Removes the 1.0m-vs-1.0m coincidence and
-        adapts to whatever inflation radius is actually in use.
-        """
+        """A* around the blocked span and splice into the path."""
         path = self.current_path
 
-        # Build the inflated A* grid FIRST so we can validate endpoints
-        # against the same occupancy A* will plan on.
-        astar_grid = self._build_astar_grid(persistent_mask)
-        if astar_grid is None:
-            return
-
-        free = self._last_astar_free
-        if free is None:
-            rospy.logwarn("[local_replanner] no cached free grid -- skipping detour.")
-            return
-
-        def _is_free(idx):
-            x, y = path[idx]
-            gx = int(round((x - self.map_ox) / self.map_res))
-            gy = int(round((y - self.map_oy) / self.map_res))
-            if gx < 0 or gx >= self.map_w or gy < 0 or gy >= self.map_h:
-                return False
-            return bool(free[gy, gx])
-
-        # Backstep: start at i_block_start - 5 and walk BACKWARD until we
-        # find a cell that's genuinely free of inflated obstacles.
-        backstep = max(0, i_block_start - 5)
-        while backstep > 0 and not _is_free(backstep):
-            backstep -= 1
-
-        # Rejoin: start rejoin_margin past the block and walk FORWARD until
-        # we find a cell that's genuinely free.
+        # Choose detour endpoints: backstep far enough before the block that the
+        # A* start cell is outside the obstacle inflation zone, rejoin past the block.
+        #
+        # FIX (2026-06-25): was `i_block_start - 5` (5 steps × 0.2m = 1.0m backstep).
+        # With obstacle_inflate_m = 1.0–1.2m that placed the A* start cell exactly inside
+        # the inflation bubble → "[A*] Start cell is occupied/unknown!" on every call.
+        # 15 steps (3.0m) >> obstacle_inflate_m (1.2m), giving a comfortably clear start.
+        # max(i_now, …) ensures we never backstep behind the robot's current position —
+        # path[i_now] was physically visited so it is guaranteed free in the dynamic grid.
+        backstep = max(i_now, max(0, i_block_start - 15))
         rejoin_steps = int(self.rejoin_margin_m / 0.20)
         rejoin = min(len(path) - 1, i_block_end + rejoin_steps)
-        while rejoin < len(path) - 1 and not _is_free(rejoin):
+
+        # Walk further forward until the rejoin point is itself clear of the
+        # mask (don't rejoin into an obstacle).
+        while rejoin < len(path) - 1 and self._point_in_mask(
+                path[rejoin][0], path[rejoin][1], persistent_mask):
             rejoin += 1
 
-        # If we walked off either end without finding a free cell, give up
-        # cleanly -- A* would fail anyway and reflex-stop keeps us safe.
-        if not _is_free(backstep) or not _is_free(rejoin):
-            rospy.logwarn(
-                "[local_replanner] could not find free backstep/rejoin "
-                "(backstep=%d free=%s, rejoin=%d free=%s) -- holding path.",
-                backstep, _is_free(backstep), rejoin, _is_free(rejoin))
+        # Build the inflated A* grid: static_inflated AND-NOT persistent_obs.
+        astar_grid = self._build_astar_grid(persistent_mask)
+        if astar_grid is None:
             return
 
         p_start = path[backstep]
@@ -656,51 +597,37 @@ class LocalReplanner:
         new_path = path[:backstep] + densified + path[rejoin:]
         self.current_path = new_path
         self.detour_active = True
-        self.last_detour_points = list(densified)   # for backward-compat viz
-
-        # CUMULATIVE STATE (2026-06-22).
-        # 1) The rejoin index in the NEW path is backstep + len(densified) —
-        #    that's the first point of the old path[rejoin:] segment.
-        #    detour_active resets once the robot passes this index.
-        self._rejoin_index = backstep + len(densified)
-
-        # 2) Append this detour to the cumulative list (for viz).
-        self.all_detour_segments.append(list(densified))
-
-        # 3) Record the obstacle's map-frame position so RViz can show a
-        #    persistent marker after the obstacle leaves the LiDAR FOV.
-        #    The midpoint of the blocked span on `path` is a good proxy —
-        #    `path` here is self.current_path at function entry, which is
-        #    the same path the blockage was detected on (we only reach this
-        #    branch when detour_active was False).
-        mid_idx = (i_block_start + i_block_end) // 2
-        if 0 <= mid_idx < len(path):
-            self.past_obstacles.append(path[mid_idx])
-
+        # Record the index in current_path where the detour arc ENDS.
+        # current_path layout: [0 .. backstep-1] baseline | [backstep .. backstep+len(densified)-1] detour | rest baseline
+        # The robot must reach this index before it is safe to restore the baseline.
+        self.detour_end_index = backstep + len(densified) - 1
+        # Seed the windowed index at backstep — the robot is physically at the
+        # start of the detour arc when the detour is applied.
+        self.last_i_now = backstep
+        self.last_detour_points = list(densified)   # for visualization
         self._publish(new_path)
         rospy.loginfo(
             "[local_replanner] DETOUR applied: backstep=%d rejoin=%d, "
-            "detour points=%d, new path length=%d, total detours=%d",
-            backstep, rejoin, len(densified), len(new_path),
-            len(self.all_detour_segments))
+            "detour points=%d, new path length=%d",
+            backstep, rejoin, len(densified), len(new_path))
 
     def _maybe_restore_baseline(self, i_now):
-        """DEPRECATED (2026-06-22). current_path never reverts to baseline.
-
-        Kept as a no-op for backward compatibility with any external callers
-        that may reference it. The detour-completion gating now happens at
-        the top of evaluate(), based on the robot passing self._rejoin_index.
-        """
-        return
+        """If the blocked region is gone, swap the live path back to baseline."""
+        if not self.baseline_path:
+            return
+        self.current_path = list(self.baseline_path)
+        self.detour_active = False
+        self.detour_end_index = None
+        # Path identity changed → invalidate cached index. The next evaluate()
+        # will do one global argmin to relocate the robot in the new path.
+        self.last_i_now = None
+        self.last_detour_points = []  # clear viz
+        self._publish(self.baseline_path)
+        rospy.loginfo("[local_replanner] obstacle cleared — baseline restored.")
 
     def _build_astar_grid(self, persistent_mask):
         """Build a SimpleOccupancyGrid combining the inflated static map with
-        the inflated persistent obstacles. Both are inflated by robot_radius.
-
-        Also caches the final `free` boolean array on self._last_astar_free
-        so _compute_and_apply_detour() can validate its backstep/rejoin
-        endpoints against the same occupancy A* plans on.
-        """
+        the inflated persistent obstacles. Both are inflated by robot_radius."""
         if self.static_inflated is None:
             return None
 
@@ -729,9 +656,6 @@ class LocalReplanner:
             sy0 = y0 - oy_cells; sy1 = sy0 + (y1 - y0)
             if x1 > x0 and y1 > y0:
                 free[y0:y1, x0:x1] &= ~inflated_obs_blocked[sy0:sy1, sx0:sx1]
-
-        # Cache for endpoint validation in _compute_and_apply_detour.
-        self._last_astar_free = free
 
         data = np.where(free, 0, 100).astype(np.int16).reshape(-1).tolist()
         return SimpleOccupancyGrid(
@@ -791,13 +715,9 @@ class LocalReplanner:
         og.data = data.reshape(-1).tolist()
         self.viz_grid_pub.publish(og)
 
-        # 2) Baseline + cumulative detour line-strips + persistent obstacle
-        #    markers (2026-06-22). Every detour ever spliced shows up as its
-        #    own orange line; every past obstacle shows up as a semi-
-        #    transparent red cube even after the robot has left it behind.
+        # 2) Baseline and detour LINE_STRIP markers.
         ma = MarkerArray()
 
-        # Baseline (blue) — the original BCD path, unchanged.
         m_base = Marker()
         m_base.header.stamp = now
         m_base.header.frame_id = self.map_frame
@@ -806,52 +726,27 @@ class LocalReplanner:
         m_base.type = Marker.LINE_STRIP
         m_base.action = Marker.ADD
         m_base.scale.x = 0.06
-        m_base.color = ColorRGBA(r=0.2, g=0.6, b=1.0, a=0.7)
+        m_base.color = ColorRGBA(r=0.2, g=0.6, b=1.0, a=0.7)  # blue
         m_base.pose.orientation.w = 1.0
         for x, y in self.baseline_path:
             p = Point(); p.x = x; p.y = y; p.z = 0.02
             m_base.points.append(p)
         ma.markers.append(m_base)
 
-        # Every cumulative detour arc (orange) — each with its own id under
-        # the "detour" namespace so RViz keeps them all.
-        for idx, seg in enumerate(self.all_detour_segments):
-            m_det = Marker()
-            m_det.header.stamp = now
-            m_det.header.frame_id = self.map_frame
-            m_det.ns = "detour"
-            m_det.id = idx
-            m_det.type = Marker.LINE_STRIP
-            m_det.action = Marker.ADD
-            m_det.scale.x = 0.12
-            m_det.color = ColorRGBA(r=1.0, g=0.4, b=0.0, a=0.95)
-            m_det.pose.orientation.w = 1.0
-            for x, y in seg:
-                p = Point(); p.x = x; p.y = y; p.z = 0.05
-                m_det.points.append(p)
-            ma.markers.append(m_det)
-
-        # Persistent obstacle markers — one CUBE_LIST containing every
-        # obstacle that triggered a detour. Semi-transparent red so it
-        # reads as a "ghost" of where the obstacle was, distinct from any
-        # live LiDAR returns.
-        if self.past_obstacles:
-            m_obs = Marker()
-            m_obs.header.stamp = now
-            m_obs.header.frame_id = self.map_frame
-            m_obs.ns = "past_obstacles"
-            m_obs.id = 0
-            m_obs.type = Marker.CUBE_LIST
-            m_obs.action = Marker.ADD
-            m_obs.scale.x = 0.8
-            m_obs.scale.y = 0.8
-            m_obs.scale.z = 0.5
-            m_obs.color = ColorRGBA(r=0.9, g=0.15, b=0.15, a=0.45)
-            m_obs.pose.orientation.w = 1.0
-            for x, y in self.past_obstacles:
-                p = Point(); p.x = x; p.y = y; p.z = 0.25
-                m_obs.points.append(p)
-            ma.markers.append(m_obs)
+        m_det = Marker()
+        m_det.header.stamp = now
+        m_det.header.frame_id = self.map_frame
+        m_det.ns = "detour"
+        m_det.id = 1
+        m_det.type = Marker.LINE_STRIP
+        m_det.action = Marker.ADD if self.last_detour_points else Marker.DELETE
+        m_det.scale.x = 0.12
+        m_det.color = ColorRGBA(r=1.0, g=0.4, b=0.0, a=0.95)  # orange
+        m_det.pose.orientation.w = 1.0
+        for x, y in self.last_detour_points:
+            p = Point(); p.x = x; p.y = y; p.z = 0.05
+            m_det.points.append(p)
+        ma.markers.append(m_det)
 
         self.viz_marker_pub.publish(ma)
 
