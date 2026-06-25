@@ -47,6 +47,16 @@
           name="local_replanner"
           output="screen" />
 
+    <!-- Return-to-start: waits for /path_follower/done, computes an A* path
+         from the robot's end-of-coverage pose to baseline[0], publishes it on
+         /return_path. local_replanner picks that up and appends it onto
+         current_path so the follower drives the return leg with persistence-
+         gated obstacle avoidance still active. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="return_to_start.py"
+          name="return_to_start"
+          output="screen" />
+
     <!-- Path Follower (tracks /desired_path) -->
     <node pkg="hakuroukun_boustrophedon_with_cones"
           type="path_follower.py"
