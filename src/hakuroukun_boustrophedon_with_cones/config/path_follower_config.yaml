@@ -11,12 +11,13 @@ pure_pursuit_hakuroukun:
   # failed to produce a new path (static wall / map boundary).
   # 40 steps x 0.20m = 8m skip — clears a stuck corner turn.
   skip_on_timeout: 15
+  obstacle_stop_range: 0.70
 
 reverse:
   enable: true
   speed: 0.18
   max_duration: 2.5       # was 1.2 — backs up ~0.45m instead of 0.22m
-  front_stop_range: 1.20
+  front_stop_range: 1.50
   front_clear_range: 1.0  # was 2.50 — static walls never reach 2.5m clearance
   front_fov_deg: 70
   angle_threshold_deg: 150

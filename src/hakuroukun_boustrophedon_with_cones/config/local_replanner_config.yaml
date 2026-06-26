@@ -28,18 +28,19 @@ local_replanner:
   eval_rate: 2.0
 
   # How far ahead along the path to scan for blockages (m).
-  lookahead_check_m: 6.0
+  lookahead_check_m: 7.0
 
   # After the last blocked path index, rejoin the baseline this many metres
   # further on so the rejoin point has clearance.
   rejoin_margin_m: 1.5
 
   # Inflation applied to detected obstacles when building the A* detour grid (m).
-  # Set larger than robot_radius (1.0m) to account for Hakuroukun's wider rear
-  # overhang — the front LiDAR clears the obstacle corner but the rear clips it
-  # because the robot is ~0.81m wide and the LiDAR is at the front.
-  # Raise to 2.0 if the rear still catches the box corner at the detour arc.
-  obstacle_inflate_m: 1.2
+  # Previously 1.2m (larger than robot_radius=1.0m) to account for rear overhang.
+  # FIX (2026-06-26): lowered to 0.9m — at close range (~0.45m HOLD trigger),
+  # 1.2m inflation made small obstacles look like wall segments, blocking A*.
+  # 0.9m gives the robot's 0.81m half-width a small safety margin without
+  # over-inflating small objects.
+  obstacle_inflate_m: 0.7
 
   # ---- LiDAR gating ---------------------------------------------------------
   # Drop returns closer than this (m) -- avoids the robot's own footprint.
