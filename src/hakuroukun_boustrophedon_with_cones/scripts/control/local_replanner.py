@@ -85,6 +85,7 @@ class LocalReplanner:
         self.scan_min_range        = rospy.get_param(f"{ns}/scan_min_range", 0.30)
         # LiDAR points farther than this are dropped (noise / out of useful range).
         self.scan_max_range        = rospy.get_param(f"{ns}/scan_max_range", 15.0)
+        self.densify_step          = rospy.get_param("densify_step", 0.20)
         # When a detour is required, A* aims to rejoin the baseline this far
         # past the blocked span (metres) so the rejoin point is comfortably clear.
         self.rejoin_margin_m       = rospy.get_param(f"{ns}/rejoin_margin_m", 1.5)
@@ -519,7 +520,7 @@ class LocalReplanner:
         Looks ahead at most lookahead_check_m metres along the path."""
         if not path:
             return None, None
-        max_steps = int(self.lookahead_check_m / 0.20)  # densify_step is 0.20m
+        max_steps = int(self.lookahead_check_m / self.densify_step)
         i_end = min(len(path), i_start + max_steps)
 
         blocked = []
@@ -558,7 +559,7 @@ class LocalReplanner:
         # max(i_now, …) ensures we never backstep behind the robot's current position —
         # path[i_now] was physically visited so it is guaranteed free in the dynamic grid.
         backstep = max(i_now, max(0, i_block_start - 15))
-        rejoin_steps = int(self.rejoin_margin_m / 0.20)
+        rejoin_steps = int(self.rejoin_margin_m / self.densify_step)
         rejoin = min(len(path) - 1, i_block_end + rejoin_steps)
 
         # Walk further forward until the rejoin point is itself clear of the
@@ -587,7 +588,7 @@ class LocalReplanner:
         # Densify the A* polyline to the same step the baseline uses (0.20m).
         densified = []
         for i in range(1, len(detour)):
-            seg = self._densify(detour[i - 1], detour[i], step=0.20)
+            seg = self._densify(detour[i - 1], detour[i], step=self.densify_step)
             if densified:
                 densified.extend(seg[1:])
             else:

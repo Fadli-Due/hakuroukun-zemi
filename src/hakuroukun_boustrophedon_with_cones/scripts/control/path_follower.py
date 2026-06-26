@@ -30,6 +30,7 @@ class PurePursuitNode:
         # 40 steps × 0.20m densify = 8m skip — enough to jump past a stuck
         # corner turn onto the next coverage lane.
         self.skip_on_timeout  = rospy.get_param(f"{pp_ns}/skip_on_timeout", 40)
+        self.obstacle_stop_range = rospy.get_param(f"{pp_ns}/obstacle_stop_range", 0.45)
 
         # ========== Reverse parameters ==========
         rp = rospy.get_param("reverse", {})
@@ -271,7 +272,7 @@ class PurePursuitNode:
             # ── Triggers ─────────────────────────────────────────────────
             # Obstacle imminent → HOLD (stop, wait for the replanner).
             # Holding stationary lets persistence build up cleanly.
-            want_hold = (self.min_front < 0.45)
+            want_hold = (self.min_front < self.obstacle_stop_range)
 
             # Legacy stuck-recovery: only fires when the robot is stuck
             # WITHOUT an immediate obstacle (e.g. U-turn binding, steering
@@ -365,7 +366,7 @@ class PurePursuitNode:
 
             # SAFETY VETO: block forward motion into close obstacles, but
             # never block reverse — that's how we recover.
-            if v > 0.0 and self.min_front < 0.45:
+            if v > 0.0 and self.min_front < self.obstacle_stop_range:
                 rospy.logwarn_throttle(1.0,
                     f"[path_follower] FORWARD VETO min_front={self.min_front:.2f}")
                 v = 0.0
