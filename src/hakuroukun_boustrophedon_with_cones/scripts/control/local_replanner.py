@@ -70,13 +70,22 @@ class LocalReplanner:
         self.eval_rate             = rospy.get_param(f"{ns}/eval_rate", 2.0)
         # How far ahead along the path we look for blockage (metres).
         self.lookahead_check_m     = rospy.get_param(f"{ns}/lookahead_check_m", 6.0)
-        # Inflation applied to detected obstacles for A* (matches the
-        # planner's robot_radius by default).
-        self.obstacle_inflate_m    = rospy.get_param("robot_radius", 1.0)
+        # Inflation applied to detected DYNAMIC obstacles when building the A*
+        # detour grid (m). FIX (2026-06-25): was rospy.get_param("robot_radius", 1.0)
+        # — global namespace so YAML's local_replanner/obstacle_inflate_m was silently
+        # ignored. Now correctly namespaced.
+        self.obstacle_inflate_m    = rospy.get_param(f"{ns}/obstacle_inflate_m", 1.0)
+        # Inflation used for STATIC walls in the pre-computed A* free mask (m).
+        # Must equal the BCD planner's robot_radius so every planned path point
+        # lies inside the A* free space. Keeping this separate from obstacle_inflate_m
+        # prevents baseline path points near walls from being falsely blocked when
+        # obstacle_inflate_m > robot_radius (would cause "Goal cell occupied" errors).
+        self.static_wall_inflate_m = rospy.get_param("robot_radius", 1.0)
         # LiDAR points closer than this are dropped (the robot's own footprint).
         self.scan_min_range        = rospy.get_param(f"{ns}/scan_min_range", 0.30)
         # LiDAR points farther than this are dropped (noise / out of useful range).
         self.scan_max_range        = rospy.get_param(f"{ns}/scan_max_range", 15.0)
+        self.densify_step          = rospy.get_param("densify_step", 0.20)
         # When a detour is required, A* aims to rejoin the baseline this far
         # past the blocked span (metres) so the rejoin point is comfortably clear.
         self.rejoin_margin_m       = rospy.get_param(f"{ns}/rejoin_margin_m", 1.5)
@@ -97,6 +106,16 @@ class LocalReplanner:
         self.current_path  = []           # list[(x,y)] currently being executed
         self.detour_active = False        # is the live path a modified one?
         self.last_detour_points = []      # for viz: the active detour polyline
+        # Index in current_path where the detour arc ends (i.e. the rejoin point).
+        # Used to keep the detour active until the robot has physically completed it,
+        # regardless of whether the obstacle is still visible to the LiDAR.
+        self.detour_end_index = None
+        # Last computed index of the robot on current_path. Used to bound the
+        # closest-point search to a forward window (mirrors path_follower's
+        # monotonic tracking). Without this, np.argmin can jump from the detour
+        # arc to the post-rejoin baseline tail when they pass geometrically close,
+        # falsely indicating the arc is completed.
+        self.last_i_now = None
 
         self.robot_xy = None              # (x, y) in map frame
         self.robot_yaw = 0.0
@@ -120,6 +139,13 @@ class LocalReplanner:
         rospy.Subscriber("/scan_multi", LaserScan, self.scan_cb, queue_size=1)
         rospy.Subscriber("/hakuroukun_pose/rear_wheel_odometry", Odometry,
                          self.odom_cb, queue_size=10)
+        # /return_path: A* return-to-home leg computed by return_to_start.py
+        # after coverage is done. When received, it is appended to current_path
+        # and republished on /desired_path so the path_follower drives it.
+        # Persistence-gated obstacle avoidance keeps working on the return leg
+        # because evaluate() runs on current_path regardless of its origin.
+        rospy.Subscriber("/return_path", Path, self.return_path_cb, queue_size=1)
+        self.return_appended = False   # one-shot guard
 
         self.path_pub = rospy.Publisher("/desired_path", Path, queue_size=1, latch=True)
 
@@ -157,7 +183,10 @@ class LocalReplanner:
             raw = np.array(msg.data, dtype=np.int16).reshape((self.map_h, self.map_w))
             free = (raw == 0)
             dist = distance_transform_edt(free) * self.map_res
-            self.static_inflated = free & (dist > self.obstacle_inflate_m)
+            # Use static_wall_inflate_m (= robot_radius) for wall clearance so
+            # BCD-planned path points are always inside the A* free space.
+            # obstacle_inflate_m is reserved for dynamic obstacles only.
+            self.static_inflated = free & (dist > self.static_wall_inflate_m)
 
             # Allocate the local obstacle grid (last-hit time per cell).
             side_cells = int(math.ceil(self.window_size_m / self.map_res))
@@ -179,9 +208,57 @@ class LocalReplanner:
             # arrives (re-plan), drop the detour -- the new baseline wins.
             self.current_path = list(self.baseline_path)
             self.detour_active = False
+            self.detour_end_index = None
+            self.last_i_now = None
+            # A new baseline starts a fresh coverage run — allow another
+            # return-leg append at the end of it.
+            self.return_appended = False
         self._publish(self.current_path)
         rospy.loginfo("[local_replanner] baseline path received: %d points",
                       len(self.baseline_path))
+
+    def return_path_cb(self, msg):
+        """Append an A* return-to-home leg from return_to_start.py.
+
+        The return path is appended onto the tail of current_path so the
+        path_follower drives from the end of coverage straight into the
+        return leg with no gap. Persistence-gated obstacle avoidance keeps
+        running on this combined path, so a person walking into the return
+        corridor still triggers a detour.
+
+        One-shot: subsequent /return_path messages within the same baseline
+        session are ignored. A new /planned_path resets the guard.
+        """
+        with self.lock:
+            if self.return_appended:
+                rospy.logwarn(
+                    "[local_replanner] /return_path received but a return leg "
+                    "was already appended this session — ignoring.")
+                return
+            if not self.current_path:
+                rospy.logwarn(
+                    "[local_replanner] /return_path received before any "
+                    "baseline — ignoring.")
+                return
+
+            return_pts = [(p.pose.position.x, p.pose.position.y)
+                          for p in msg.poses]
+            if not return_pts:
+                rospy.logwarn("[local_replanner] /return_path is empty — ignoring.")
+                return
+
+            # Append. current_path may contain detours already; that's fine —
+            # the return leg sits after whatever the existing tail is.
+            self.current_path = list(self.current_path) + return_pts
+            self.return_appended = True
+            # last_i_now refers to current_path; appending doesn't invalidate
+            # the existing index. Leave it untouched.
+
+        self._publish(self.current_path)
+        rospy.loginfo(
+            "[local_replanner] return leg appended: %d points, "
+            "new current_path length = %d.",
+            len(return_pts), len(self.current_path))
 
     def odom_cb(self, msg):
         try:
@@ -318,18 +395,35 @@ class LocalReplanner:
             obs = self.obs_grid
             persistent_mask = self._compute_persistent_mask(obs, now)
 
-        # 2) Find the robot's index on the current path (search forward only).
-        i_now = self._closest_path_index(self.current_path, self.robot_xy)
+        # 2) Find the robot's index on the current path using monotonic
+        # windowed search. This prevents argmin from jumping to the
+        # post-rejoin baseline tail when the detour arc passes geometrically
+        # near it (which would falsely signal arc completion).
+        i_now = self._closest_path_index_windowed(
+            self.current_path, self.robot_xy, self.last_i_now)
+        self.last_i_now = i_now
 
         # 3) Find the first blocked index ahead within lookahead_check_m.
         i_block_start, i_block_end = self._find_blocked_span(
             self.current_path, i_now, persistent_mask)
 
         if i_block_start is None:
-            # No persistent obstacle ahead. If a detour was active, attempt to
-            # restore the baseline (transition handled in restore).
-            if self.detour_active:
-                self._maybe_restore_baseline(i_now)
+            # No persistent obstacle ahead on current_path. Do nothing.
+            #
+            # Design choice (2026-06-25): detours are PERMANENT once applied.
+            # The persistence-gated logic only fires a detour after an obstacle
+            # has remained in place for >= persistence_threshold seconds, at
+            # which point it is classified as static and assumed to stay.
+            # Reverting to the pristine baseline would contradict this model —
+            # losing sight of a static obstacle (e.g. it left the LiDAR FOV
+            # as the robot turned) does NOT mean the obstacle is gone, and
+            # restoring the baseline path can send the robot back toward it.
+            #
+            # If another persistent obstacle appears later, _compute_and_apply_detour
+            # will splice a new detour onto the already-modified current_path
+            # — the algorithm always works on self.current_path, never on the
+            # pristine baseline, so multiple detours stack correctly.
+            pass
         else:
             # 4) A blockage exists. Compute and splice a detour.
             rospy.loginfo(
@@ -387,6 +481,38 @@ class LocalReplanner:
         d2 = (px - xy[0]) ** 2 + (py - xy[1]) ** 2
         return int(np.argmin(d2))
 
+    def _closest_path_index_windowed(self, path, xy, last_i,
+                                     back_window=10, fwd_window=50):
+        """Closest path index restricted to a forward window around last_i.
+
+        Mirrors path_follower's monotonic tracking. Prevents 'argmin jumps'
+        when the path doubles back near itself — e.g., a detour arc that
+        loops around an obstacle and rejoins the baseline. In that case a
+        global argmin can return a post-rejoin baseline point even though
+        the robot is physically still on the arc, leading to a premature
+        'arc completed' decision and an unwanted baseline restore.
+
+        - back_window allows small reverse motion (REVERSE mode) without
+          locking the index in place.
+        - fwd_window must be large enough to track forward motion between
+          eval ticks (eval_rate=2 Hz, robot ~0.35 m/s, densify=0.20 m
+          → ~1 index per tick; 50 is comfortably generous).
+        - Falls back to global argmin when last_i is None (first call or
+          immediately after a path swap)."""
+        if not path:
+            return 0
+        if last_i is None:
+            return self._closest_path_index(path, xy)
+        last_i = max(0, min(last_i, len(path) - 1))
+        lo = max(0, last_i - back_window)
+        hi = min(len(path), last_i + fwd_window + 1)
+        if lo >= hi:
+            return last_i
+        px = np.array([p[0] for p in path[lo:hi]])
+        py = np.array([p[1] for p in path[lo:hi]])
+        d2 = (px - xy[0]) ** 2 + (py - xy[1]) ** 2
+        return lo + int(np.argmin(d2))
+
     def _find_blocked_span(self, path, i_start, persistent_mask):
         """Scan forward from i_start. Return (first_blocked, last_blocked)
         in path-index space, or (None, None) if no blockage within lookahead.
@@ -394,7 +520,7 @@ class LocalReplanner:
         Looks ahead at most lookahead_check_m metres along the path."""
         if not path:
             return None, None
-        max_steps = int(self.lookahead_check_m / 0.20)  # densify_step is 0.20m
+        max_steps = int(self.lookahead_check_m / self.densify_step)
         i_end = min(len(path), i_start + max_steps)
 
         blocked = []
@@ -423,10 +549,17 @@ class LocalReplanner:
         """A* around the blocked span and splice into the path."""
         path = self.current_path
 
-        # Choose detour endpoints: small backstep before the block,
-        # rejoin a bit past the block to give clearance.
-        backstep = max(0, i_block_start - 5)
-        rejoin_steps = int(self.rejoin_margin_m / 0.20)
+        # Choose detour endpoints: backstep far enough before the block that the
+        # A* start cell is outside the obstacle inflation zone, rejoin past the block.
+        #
+        # FIX (2026-06-25): was `i_block_start - 5` (5 steps × 0.2m = 1.0m backstep).
+        # With obstacle_inflate_m = 1.0–1.2m that placed the A* start cell exactly inside
+        # the inflation bubble → "[A*] Start cell is occupied/unknown!" on every call.
+        # 15 steps (3.0m) >> obstacle_inflate_m (1.2m), giving a comfortably clear start.
+        # max(i_now, …) ensures we never backstep behind the robot's current position —
+        # path[i_now] was physically visited so it is guaranteed free in the dynamic grid.
+        backstep = max(i_now, max(0, i_block_start - 15))
+        rejoin_steps = int(self.rejoin_margin_m / self.densify_step)
         rejoin = min(len(path) - 1, i_block_end + rejoin_steps)
 
         # Walk further forward until the rejoin point is itself clear of the
@@ -455,7 +588,7 @@ class LocalReplanner:
         # Densify the A* polyline to the same step the baseline uses (0.20m).
         densified = []
         for i in range(1, len(detour)):
-            seg = self._densify(detour[i - 1], detour[i], step=0.20)
+            seg = self._densify(detour[i - 1], detour[i], step=self.densify_step)
             if densified:
                 densified.extend(seg[1:])
             else:
@@ -465,6 +598,13 @@ class LocalReplanner:
         new_path = path[:backstep] + densified + path[rejoin:]
         self.current_path = new_path
         self.detour_active = True
+        # Record the index in current_path where the detour arc ENDS.
+        # current_path layout: [0 .. backstep-1] baseline | [backstep .. backstep+len(densified)-1] detour | rest baseline
+        # The robot must reach this index before it is safe to restore the baseline.
+        self.detour_end_index = backstep + len(densified) - 1
+        # Seed the windowed index at backstep — the robot is physically at the
+        # start of the detour arc when the detour is applied.
+        self.last_i_now = backstep
         self.last_detour_points = list(densified)   # for visualization
         self._publish(new_path)
         rospy.loginfo(
@@ -478,6 +618,10 @@ class LocalReplanner:
             return
         self.current_path = list(self.baseline_path)
         self.detour_active = False
+        self.detour_end_index = None
+        # Path identity changed → invalidate cached index. The next evaluate()
+        # will do one global argmin to relocate the robot in the new path.
+        self.last_i_now = None
         self.last_detour_points = []  # clear viz
         self._publish(self.baseline_path)
         rospy.loginfo("[local_replanner] obstacle cleared — baseline restored.")

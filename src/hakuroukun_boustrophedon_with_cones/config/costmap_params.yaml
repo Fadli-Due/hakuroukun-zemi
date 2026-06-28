@@ -8,7 +8,7 @@ publish_frequency: 2             # Publish costmap every 2 Hz
 transform_tolerance: 0.3           # Tolerance for TF lookups
 
 # Robot and Costmap Dimensions
-robot_radius: 0.3                  # Radius of the robot in meters
+robot_radius: 0.45                  # Radius of the robot in meters
 resolution: 0.05                   # Grid resolution in meters/cell
 width: 200.0                        # Width of the costmap in meters (50 x 50 grid at 0.05 resolution)
 height: 200.0                       # Height of the costmap in meters
@@ -52,4 +52,4 @@ obstacle_layer:
 inflation_layer:
   enabled: true
   cost_scaling_factor: 0.1
-  inflation_radius: 0.6    # meters
+  inflation_radius: 0.8    # meters

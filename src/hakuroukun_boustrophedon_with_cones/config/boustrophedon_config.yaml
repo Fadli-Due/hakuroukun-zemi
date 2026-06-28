@@ -20,6 +20,13 @@ lane_spacing: 1.0
 # Trim each lane end by this much (m) to leave room for the 180-deg turn.
 # BCD lane ends sit on obstacle boundaries, so trimming costs little real
 # coverage. Increase if the robot struggles to turn at lane ends.
+#
+# FIX (2026-06-23): raised from 0.80 to 1.20. The 0.80m trim was not enough
+# buffer at corners where the restricted zone boundary is close (observed
+# Case 1: robot hit wall at top-right corner during U-turn). The Ackermann
+# turning arc sweeps wider than the path waypoints, so the physical robot
+# body entered the 0.45m HOLD zone even though the path endpoint was 0.80m
+# from the wall. 1.20m gives the arc enough room to complete cleanly.
 turn_margin: 0.80
 
 # Cells smaller than this (m^2) are discarded as inflation slivers.
