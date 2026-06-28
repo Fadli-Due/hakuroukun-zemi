@@ -15,7 +15,7 @@ local_replanner:
 
   # A cell that has not been hit for this long is forgotten. Should be much
   # smaller than persistence_threshold; ~1s smooths over single-scan dropouts.
-  clear_time: 3.0
+  clear_time: 1.0
 
   # ---- local obstacle window -------------------------------------------------
   # Side length (m) of the obstacle grid window centred on the robot. Keep
@@ -28,11 +28,19 @@ local_replanner:
   eval_rate: 2.0
 
   # How far ahead along the path to scan for blockages (m).
-  lookahead_check_m: 6.0
+  lookahead_check_m: 7.0
 
   # After the last blocked path index, rejoin the baseline this many metres
   # further on so the rejoin point has clearance.
   rejoin_margin_m: 1.5
+
+  # Inflation applied to detected obstacles when building the A* detour grid (m).
+  # Previously 1.2m (larger than robot_radius=1.0m) to account for rear overhang.
+  # FIX (2026-06-26): lowered to 0.9m — at close range (~0.45m HOLD trigger),
+  # 1.2m inflation made small obstacles look like wall segments, blocking A*.
+  # 0.9m gives the robot's 0.81m half-width a small safety margin without
+  # over-inflating small objects.
+  obstacle_inflate_m: 0.7
 
   # ---- LiDAR gating ---------------------------------------------------------
   # Drop returns closer than this (m) -- avoids the robot's own footprint.
@@ -45,6 +53,7 @@ local_replanner:
   map_frame: "map"
   laser_frame: "laser_link"
 
-# NOTE: the obstacle inflation distance used for A* detours is read from the
-# planner's `robot_radius` parameter (loaded by boustrophedon_config.yaml),
-# so detour clearance always matches baseline clearance.
+# NOTE: obstacle_inflate_m above controls detour clearance independently of
+# robot_radius. They were previously coupled (both = 1.0m) but Hakuroukun's
+# rear overhang means the detour needs more clearance than the static map
+# inflation uses.
