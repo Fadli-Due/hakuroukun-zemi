@@ -90,26 +90,40 @@ replaces Tai's online TASP planner from the previous study.
   - **Layer 2 — Local replanner** (`local_replanner.py`): Watches LiDAR
     for obstacles that **persist on the path for ≥ 7 seconds**, then splices
     an A\*-computed detour into the baseline. Yields to transient obstacles
-    (pedestrians passing) but routes around static blockers.
+    (pedestrians passing) but routes around static blockers. **Detours are
+    permanent commitments** — once an obstacle is classified as static
+    (persistence ≥ 7 s), the spliced detour stays in `current_path` for
+    the rest of the run. The old "restore baseline when LiDAR loses sight"
+    behavior was removed (2026-06-25): losing sight of a static obstacle
+    doesn't mean it's gone, and reverting to the pristine baseline would
+    contradict the persistence model.
+- **Return-to-start** (`return_to_start.py`): After coverage completes
+  (path_follower reports robot has held final pose for ≥ 2 s), an A\* path
+  from current pose back to `baseline[0]` is computed and appended to
+  `current_path`. The robot drives home automatically. Persistence-gated
+  obstacle avoidance keeps running on the return leg — if someone walks
+  into the corridor, a detour is spliced onto the return path the same
+  way it would be on a coverage lane.
 - **Restricted zones via cones**: Cones are pre-painted into the planning
   map (Phase A). Real-time ZED2-based detection (Phase B) is deferred.
 
 ### Topic flow
 
 ```
-offline_coverage_planner ──/planned_path──> local_replanner ──/desired_path──> path_follower
-                                                  ↑                ↑
-                                           /scan_multi (LiDAR)     │
-                                                           return_to_start
-                                                        (appends /return_path
-                                                         on /path_follower/done)
+offline_coverage_planner ──/planned_path──┐
+                                          ├──> local_replanner ──/desired_path──> path_follower
+return_to_start ──────────/return_path────┘                                              │
+        ↑                                  ↑                                             │
+        │                              /scan_multi (LiDAR)                               │
+        └──────/path_follower/done ◄──────────────────────────────────────────────────────┘
 ```
 
 `/planned_path` is the latched baseline BCD path. `/desired_path` is what
 the follower actually tracks — equal to baseline when no detour is active,
-spliced detour when one is. Once the follower publishes `/path_follower/done`,
-`return_to_start.py` computes an A\* path back to `baseline[0]` and publishes
-`/return_path`; `local_replanner.py` appends it to `current_path` automatically.
+spliced detour when one is, with the return-to-home leg appended after
+coverage completes. `/path_follower/done` is a latched Bool fired once
+when the robot has held the final coverage pose for `done_dwell_time`
+seconds; this triggers `return_to_start` to compute the A\* return path.
 
 ### Package layout
 
@@ -138,6 +152,7 @@ hakuroukun_boustrophedon_with_cones/
 ├── scripts/
 │   ├── planning/
 │   │   ├── offline_coverage_planner.py   ← BCD; publishes /planned_path
+│   │   ├── return_to_start.py            ← A* return-to-home leg after /done
 │   │   └── simple_astar.py
 │   ├── control/
 │   │   ├── path_follower.py              ← pure pursuit + reflex stop
@@ -223,7 +238,22 @@ Useful log lines to confirm a healthy start:
 - `[BCD] N coverage cells`
 - `[BCD] published /planned_path with N points`
 - `[local_replanner] baseline path received: N points`
+- `[return_to_start] ready. robot_radius=1.00 densify=0.20`
+- `[return_to_start] baseline received: home = (X, Y)`
+- `[return_to_start] static map ready (WxH, res=...m)`
 - `[pf] mode=FORWARD v=0.25 steer=...`
+
+At the **end of coverage**, the return leg sequence should look like this:
+```
+[path_follower] /path_follower/done published (dist_to_final=X.XXm, dwell=2.0s).
+[return_to_start] computing return: (X, Y) -> (X0, Y0)
+[return_to_start] return path published: N A* points, M densified points.
+[local_replanner] return leg appended: M points, new current_path length = ...
+[path_follower] new path (... pts): closest_i seeded at ...
+```
+If `/path_follower/done` fires but the next three lines don't appear, check
+that `return_to_start` is actually running and the static map / robot pose
+are both ready (see its startup logs above).
 
 **T5 — Live coverage readout:**
 ```bash
@@ -241,6 +271,7 @@ rosnode kill /conemap_recorder
 - `/cleaned_map` (Map, alpha ~0.5) — coverage trail.
 - `/planned_path` (Path) — blue baseline BCD path.
 - `/desired_path` (Path) — what the follower is tracking *now*.
+- `/return_path` (Path) — A\* return-to-home leg (appears at end of coverage).
 - `/local_replanner/obstacle_grid` (Map) — persistent obstacle cells.
 - `/local_replanner/markers` (MarkerArray) — blue baseline + orange active detour.
 - `/particlecloud` (PoseArray) — AMCL convergence check.
@@ -438,3 +469,14 @@ return-to-start path executed at the end of coverage.
   the coverage denominator.
 - `path_follower_config.yaml` ships with `lookahead_distance: 0.8` and
   `max_search_ahead: 25`. Larger values caused oscillation at U-turns.
+- `path_follower_config.yaml` also has `done_dwell_time: 2.0` — the robot
+  must hold the final coverage pose for this many seconds before
+  `/path_follower/done` fires. Filters out end-of-path wiggle (REVERSE /
+  FORWARD recovery oscillation near the final point) so the return leg
+  doesn't trigger during a recovery transition.
+- `local_replanner_config.yaml` has `obstacle_inflate_m` for dynamic
+  obstacles and uses the global `robot_radius` for static wall inflation
+  in the A\* grid. **Keep these separate** — making the wall inflation
+  larger than `robot_radius` will mark baseline path points as occupied
+  in the A\* grid and produce intermittent "Goal cell occupied" errors
+  when computing detours near walls.
