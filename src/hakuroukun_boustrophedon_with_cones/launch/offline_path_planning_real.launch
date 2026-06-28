@@ -78,6 +78,14 @@
         <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
     </node>
 
+    <!-- Return-to-Start: waits for /path_follower/done, then A*-routes
+         the robot back to baseline[0] and publishes /return_path.
+         local_replanner.py appends this to current_path automatically. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="return_to_start.py"
+          name="return_to_start"
+          output="screen" />
+
     <!-- RViz -->
     <group if="$(arg open_rviz)">
         <node pkg="rviz" type="rviz" name="rviz" required="true"
