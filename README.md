@@ -98,13 +98,18 @@ replaces Tai's online TASP planner from the previous study.
 
 ```
 offline_coverage_planner ──/planned_path──> local_replanner ──/desired_path──> path_follower
-                                                  ↑
-                                           /scan_multi (LiDAR)
+                                                  ↑                ↑
+                                           /scan_multi (LiDAR)     │
+                                                           return_to_start
+                                                        (appends /return_path
+                                                         on /path_follower/done)
 ```
 
 `/planned_path` is the latched baseline BCD path. `/desired_path` is what
 the follower actually tracks — equal to baseline when no detour is active,
-spliced detour when one is.
+spliced detour when one is. Once the follower publishes `/path_follower/done`,
+`return_to_start.py` computes an A\* path back to `baseline[0]` and publishes
+`/return_path`; `local_replanner.py` appends it to `current_path` automatically.
 
 ### Package layout
 
@@ -137,6 +142,7 @@ hakuroukun_boustrophedon_with_cones/
 │   ├── control/
 │   │   ├── path_follower.py              ← pure pursuit + reflex stop
 │   │   ├── local_replanner.py            ← online detour layer
+│   │   ├── return_to_start.py            ← A* return to baseline[0] on /path_follower/done
 │   │   ├── map_odom_calibrator.py        ← dynamic map→odom TF (RViz 2D Pose Estimate)
 │   │   ├── odom_tf_broadcaster.py        ← real-robot odom→base_link TF
 │   │   └── sim_teleop_key.py
@@ -356,7 +362,7 @@ rosbag record -a -O real_run_$(date +%Y%m%d_%H%M%S).bag \
 rosrun hakuroukun_boustrophedon_with_cones cleaning_simulator.py
 ```
 
-**T4 — Planner + replanner + follower + RViz:**
+**T4 — Planner + replanner + follower + return-to-start + RViz:**
 ```bash
 roslaunch hakuroukun_boustrophedon_with_cones offline_path_planning_real.launch
 ```
@@ -399,11 +405,30 @@ corrected, instead of AMCL's particle filter.
 For best results, calibrate while the robot is **stationary** and check
 against a second known waypoint before starting a coverage run.
 
+### Simulation results (thesis runs)
+
+Both runs used the conemap world with `obstacle_inflate_m: 0.6` and
+`obstacle_stop_range: 0.70` (enforcing the invariant: stop distance > inflation
+radius).
+
+| Run | Bag | Coverage | Area | Detours fired |
+|-----|-----|----------|------|---------------|
+| Run 1 | `conemap_with_return_20260626_031733.bag` | **65.20%** | 488.05 m² | 1 |
+| Run 2 | `conemap_run_20260626_052306.bag` | **63.96%** | — | 2 |
+
+Baseline comparison: Tai's TASP = 52.80%.
+
+Run 2 was a parameter-tuned repeat that fixed the A\* start-cell-inside-inflation-bubble
+bug introduced when changing `obstacle_inflate_m`. Both runs confirmed a 263-point
+return-to-start path executed at the end of coverage.
+
 ### Key references
 
 - Choset & Pignon, 1998 — Boustrophedon Cell Decomposition.
 - Galceran & Carreras, 2013 — CPP survey.
 - Nguyen Van Tai, 2024 — previous TASP work in this lab (baseline: 52.80% coverage).
+- Schmid et al., 2023 — Dynablox (IEEE RA-L, DOI: 10.1109/LRA.2023.3305239) — supports "persistence-gated" obstacle terminology.
+- Kondo et al., 2026 — SANDO (arXiv:2604.07599) — supports "persistence-gated" replanning concept.
 
 ### Notes on conventions
 
