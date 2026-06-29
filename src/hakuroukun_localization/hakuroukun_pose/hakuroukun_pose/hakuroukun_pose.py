@@ -48,7 +48,7 @@ class HakuroukunPose:
         
         self._register_parameters()
 
-        # self._get_initial_orientation()
+        self._get_initial_orientation()  # FIX: restored (was commented out)
 
         self._get_initial_pose()
 
@@ -61,11 +61,11 @@ class HakuroukunPose:
 
         self._register_subscribers()
 
-        # self._register_log_data()
+        self._register_log_data()  # FIX: restored (was commented out)
 
-        # self._register_timers()
+        self._register_timers()  # FIX: restored (was commented out)
 
-        # self.previous_yaw = self._imu_offset
+        self.previous_yaw = self._imu_offset  # FIX: restored (was commented out)
 
     def run(self):
         """! Start ros node
@@ -363,8 +363,6 @@ class HakuroukunPose:
 
         pose = f"{elapsed_time}, {self._x_rear}, {self._y_rear}, {math.degrees(self._yaw)}"
 
-        # pose = (f"{elapsed_time}, {self._x_rear}, {self._y_rear}, "
-        rospy.loginfo(f"Pose: {pose}")
         rospy.loginfo(f"Pose: {pose}")
 
         with open(self._file_name, mode="a") as f:
