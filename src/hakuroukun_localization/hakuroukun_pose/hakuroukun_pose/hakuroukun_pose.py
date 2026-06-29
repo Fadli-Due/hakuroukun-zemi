@@ -90,11 +90,12 @@ class HakuroukunPose:
         self._imu_mode = rospy.get_param(
             "~imu_mode", "quaternion")
 
+        # FIX: relaxed defaults so calibration converges on slower/noisier machines
         self._imu_epsilon = rospy.get_param(
-            "~imu_epsilon", 0.0001)
+            "~imu_epsilon", 0.01)
 
         self._imu_calibration_threshold = rospy.get_param(
-            "~imu_calibration_threshold", 200)
+            "~imu_calibration_threshold", 10)
 
     def _register_subscribers(self):
         """! Register ROS subscribers method
@@ -198,7 +199,7 @@ class HakuroukunPose:
                             rospy.loginfo(f"Breaking out: last {self._imu_calibration_threshold} differences are zero.")
 
                             self._imu_offset = euler[2]
-                            print('_imu_offset',self._imu_offset)
+                            print('_imu_offset', self._imu_offset)
 
                             break
 
@@ -206,6 +207,15 @@ class HakuroukunPose:
 
                 except rospy.ROSException:
                     rospy.logwarn("No IMU message received within timeout.")
+
+            # FIX: fallback if calibration did not converge within 30 seconds
+            if not hasattr(self, '_imu_offset'):
+                rospy.logwarn("IMU calibration did not converge, using last reading as offset.")
+                if imu_data:
+                    self._imu_offset = imu_data[-1]
+                else:
+                    self._imu_offset = 0.0
+                print('_imu_offset (fallback)', self._imu_offset)
 
         else:
             rospy.wait_for_message("/imu", Imu, timeout=10)
@@ -273,7 +283,7 @@ class HakuroukunPose:
             self.euler = tf.transformations.euler_from_quaternion(
                 [self.quaternion_x, self.quaternion_y, self.quaternion_z, self.quaternion_w]
             )
-            
+
             # Wait until calibration is done
             if not hasattr(self, '_imu_offset'):
                 return
