@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "/home/hakurokun/hakuroukun_zemi/hakuroukun-tasp-with-cones/src"
+    "cmake.sourceDirectory": "/home/systemlab/hakuroukun-zemi/src",
+    "ROS2.distro": "noetic"
 }
