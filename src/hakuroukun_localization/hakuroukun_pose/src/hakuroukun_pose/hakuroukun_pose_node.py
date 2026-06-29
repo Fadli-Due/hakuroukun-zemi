@@ -65,7 +65,7 @@ class HakuroukunPose:
             "/fix", NavSatFix, self._gps_callback)
 
         self.imu_sub = rospy.Subscriber(
-            "/imu/data_raw", Imu, self._imu_callback)
+            "/imu", Imu, self._imu_callback)
 
     def _register_publishers(self):
         """! Register publishers
