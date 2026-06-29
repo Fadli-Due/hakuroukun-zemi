@@ -15,6 +15,8 @@ import math
 import time
 from datetime import datetime
 
+from numpy import rate
+
 # External Libraries
 import tf
 import rospy
@@ -50,7 +52,10 @@ class HakuroukunPose:
 
         self._get_initial_pose()
 
-        rospy.sleep(3)
+        rate = rospy.Rate(10)
+        while not hasattr(self, '_imu_offset') and not rospy.is_shutdown():
+            rospy.loginfo("Waiting for IMU calibration...")
+            rate.sleep()
 
         self._register_publishers()
 
@@ -268,6 +273,10 @@ class HakuroukunPose:
             self.euler = tf.transformations.euler_from_quaternion(
                 [self.quaternion_x, self.quaternion_y, self.quaternion_z, self.quaternion_w]
             )
+            
+            # Wait until calibration is done
+            if not hasattr(self, '_imu_offset'):
+                return
 
             # Calculate yaw and normalize it
             new_yaw = self.euler[2] - self._imu_offset
