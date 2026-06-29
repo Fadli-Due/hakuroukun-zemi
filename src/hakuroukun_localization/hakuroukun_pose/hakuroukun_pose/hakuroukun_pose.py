@@ -98,7 +98,7 @@ class HakuroukunPose:
             "/fix", NavSatFix, self._gps_callback)
 
         self._imu_sub = rospy.Subscriber(
-            "/imu/data_raw", Imu, self._imu_callback)
+            "/imu", Imu, self._imu_callback)
 
     def _register_publishers(self):
         """! Register publishers method
@@ -171,7 +171,7 @@ class HakuroukunPose:
             while not rospy.is_shutdown() and (time.time() - start_time < 30):
                 try:
                     data = rospy.wait_for_message(
-                        "/imu/data_raw", Imu, timeout=3.0)
+                        "/imu", Imu, timeout=3.0)
 
                     euler = tf.transformations.euler_from_quaternion(
                         [data.orientation.x,
@@ -203,7 +203,7 @@ class HakuroukunPose:
                     rospy.logwarn("No IMU message received within timeout.")
 
         else:
-            rospy.wait_for_message("/imu/data_raw", Imu, timeout=10)
+            rospy.wait_for_message("/imu", Imu, timeout=10)
 
             self._yaw = 0.0
 

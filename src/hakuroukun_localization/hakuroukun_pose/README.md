@@ -50,7 +50,7 @@ Then, having an x_origin_earth, y_origin_earth
 ## Subscribed Topics
 "/fix", NavSatFix
 
-"/imu/data_raw", Imu
+"/imu", Imu
 ## Published Topics
 "/hakuroukun_pose/rear_wheel_position", PoseStamped
 
