@@ -2,6 +2,7 @@
 import rospy
 import numpy as np
 from nav_msgs.msg import OccupancyGrid, Odometry
+from std_msgs.msg import Float32
 from collections import deque
 
 # Global variables
@@ -14,6 +15,9 @@ cleaned_map_pub = None
 distance_threshold = 0.2  # Minimum movement to update cleaning
 persistent_grid = None  # Stores all cleaned areas permanently
 radius_cells = int((cleaning_width_m / 2) / resolution)  # Cleaning radius in grid cells
+# Valid area denominator received from the BCD planner (inflated free space only).
+# None until /bcd_valid_area_m2 is received; falls back to raw free-cell count.
+bcd_valid_area_m2 = None
 
 def world_to_grid(x, y):
     """ Convert world coordinates (x, y) to grid indices. """
@@ -117,11 +121,43 @@ def odom_callback(msg):
     # Publish updated map
     cleaned_map_pub.publish(cleaned_map_msg)
 
+    # Log coverage using BCD-inflated denominator (Sensei's definition:
+    # valid area = white BCD-planned area only, black obstacles excluded).
+    cleaned_m2, valid_m2, pct = compute_coverage()
+    rospy.loginfo_throttle(
+        5, "[sim] Cleaned: %.2f m^2 / Valid: %.2f m^2 | Coverage: %.2f%%"
+        % (cleaned_m2, valid_m2, pct))
+
+def valid_area_callback(msg):
+    """Receive the BCD-inflated free area from the planner and use it as the
+    coverage denominator instead of counting raw map free cells."""
+    global bcd_valid_area_m2
+    bcd_valid_area_m2 = msg.data
+    rospy.loginfo("[sim] BCD valid area received: %.2f m^2" % bcd_valid_area_m2)
+
+
+def compute_coverage():
+    """Return (cleaned_m2, valid_m2, pct) using the BCD denominator when
+    available, falling back to raw free-cell count otherwise."""
+    if persistent_grid is None:
+        return 0.0, 0.0, 0.0
+    cell_area = resolution * resolution
+    cleaned_m2 = float(np.sum(persistent_grid == 50)) * cell_area
+    if bcd_valid_area_m2 is not None and bcd_valid_area_m2 > 0:
+        valid_m2 = bcd_valid_area_m2
+    else:
+        # Fallback: count raw free (0) + cleaned (50) cells from the map.
+        valid_m2 = float(np.sum((persistent_grid == 0) | (persistent_grid == 50))) * cell_area
+    pct = 100.0 * cleaned_m2 / valid_m2 if valid_m2 > 0 else 0.0
+    return cleaned_m2, valid_m2, pct
+
+
 def main():
     global cleaned_map_pub
     rospy.init_node('cleaning_simulator')
 
     rospy.Subscriber("/map", OccupancyGrid, map_callback)
+    rospy.Subscriber("/bcd_valid_area_m2", Float32, valid_area_callback)
     odom_topic = rospy.get_param("~odom_topic", "/ground_truth/odometry")
     rospy.Subscriber(odom_topic, Odometry, odom_callback)
     #rospy.Subscriber("/ground_truth/odometry", Odometry, odom_callback)  #/ground_truth/odometry #/hakuroukun_pose/rear_wheel_odometry
