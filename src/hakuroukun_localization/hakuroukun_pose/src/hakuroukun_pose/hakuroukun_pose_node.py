@@ -183,7 +183,7 @@ class HakuroukunPose:
 
         # What is this lol
         # This is a magic number - the angle between the GPS and the robot's
-        rotation_angle = math.radians(-13.5255 - 6.3102 + 11.9329)
+        rotation_angle = math.radians(172.1)  # measured 2026-06-30 via GPS straight-line drive
 
         x_gps, y_gps = gc.ll2xy(latitude, longitude, initial_lat, initial_lon)
 
