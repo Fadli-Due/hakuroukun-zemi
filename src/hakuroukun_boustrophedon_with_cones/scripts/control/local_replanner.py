@@ -361,6 +361,14 @@ class LocalReplanner:
 
         with self.lock:
             new = np.zeros_like(self.obs_grid)
+            # FIX (2026-07-02): also shift obs_first in lockstep so accumulated
+            # persistence timestamps survive the recenter. Previously only obs_grid
+            # was shifted; obs_first stayed at old positions, causing its entries
+            # for already-seen cells to become misaligned and effectively zeroed on
+            # the next _compute_persistent_mask call — resetting the 7s clock and
+            # preventing detours from ever firing when the robot approached an
+            # obstacle while moving (the common case).
+            new_first = np.zeros_like(self.obs_grid)
             # Copy overlap region from old grid into new grid (shifted).
             src_x0 = max(0, dx_cells)
             src_y0 = max(0, dy_cells)
@@ -373,7 +381,13 @@ class LocalReplanner:
             if src_x1 > src_x0 and src_y1 > src_y0:
                 new[dst_y0:dst_y1, dst_x0:dst_x1] = \
                     self.obs_grid[src_y0:src_y1, src_x0:src_x1]
+                if hasattr(self, "obs_first") and self.obs_first is not None \
+                        and self.obs_first.shape == self.obs_grid.shape:
+                    new_first[dst_y0:dst_y1, dst_x0:dst_x1] = \
+                        self.obs_first[src_y0:src_y1, src_x0:src_x1]
             self.obs_grid = new
+            if hasattr(self, "obs_first") and self.obs_first is not None:
+                self.obs_first = new_first
             self.obs_ox = self.obs_ox + dx_cells * self.map_res
             self.obs_oy = self.obs_oy + dy_cells * self.map_res
 
