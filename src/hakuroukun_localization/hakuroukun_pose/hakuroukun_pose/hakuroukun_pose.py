@@ -34,12 +34,19 @@ class HakuroukunPose:
 
     def _register_parameters(self):
         self.publish_rate = 0.1
-        # NOTE: self.orientation used to be frozen at 0 and never updated,
-        # so the gps_to_rear_axis correction below was only ever applied
-        # along the calibration heading. self.yaw (from the IMU callback)
-        # is the live heading; default it here in case a GPS message
-        # arrives before the first IMU message.
         self.yaw = 0.0
+        # Safe defaults until first GPS/IMU message arrives
+        self.x_rear = 0.0
+        self.y_rear = 0.0
+        self.quaternion_x = 0.0
+        self.quaternion_y = 0.0
+        self.quaternion_z = 0.0
+        self.quaternion_w = 1.0
+        self._last_imu_time = 0.0
+        # Gyro bias calibration
+        self._bias_samples = []
+        self._gyro_bias_z = 0.0
+        self._bias_calibrated = False
 
     def _register_subscribers(self):
         self.gps_sub = rospy.Subscriber(
@@ -64,6 +71,7 @@ class HakuroukunPose:
         current_folder = os.path.dirname(os.path.abspath(__file__))
         new_folder = os.path.join(current_folder, '..', '..', 'log_data')
         new_folder = os.path.normpath(new_folder)
+        os.makedirs(new_folder, exist_ok=True)
         japan_timezone = pytz.timezone('Asia/Tokyo')
         current_time = datetime.now(japan_timezone).strftime(
             "position_log_%Y%m%d_%H-%M")
@@ -90,20 +98,27 @@ class HakuroukunPose:
             gps_to_rear_axis * math.sin(self.yaw)
 
     def _imu_callback(self, data: Imu):
-        self.quaternion_x = data.orientation.x
-        self.quaternion_y = data.orientation.y
-        self.quaternion_z = data.orientation.z
-        self.quaternion_w = data.orientation.w
-        self.angular_velocity_x = data.angular_velocity.x
-        self.angular_velocity_y = data.angular_velocity.y
-        self.angular_velocity_z = data.angular_velocity.z
-        self.linear_acceleration_x = data.linear_acceleration.x
-        self.linear_acceleration_y = data.linear_acceleration.y
-        self.linear_acceleration_z = data.linear_acceleration.z
-        self.quad = [self.quaternion_x, self.quaternion_y,
-                     self.quaternion_z, self.quaternion_w]
-        self.euler = self._get_euler_from_quaternion(self.quad)
-        self.yaw = self.euler[2] + 0.2526352784505572
+        raw_z = data.angular_velocity.z
+
+        # Bias calibration: collect first 50 samples while stationary
+        if not self._bias_calibrated:
+            self._bias_samples.append(raw_z)
+            if len(self._bias_samples) >= 50:
+                self._gyro_bias_z = sum(self._bias_samples) / len(self._bias_samples)
+                self._bias_calibrated = True
+                rospy.loginfo(f"Gyro Z bias calibrated: {self._gyro_bias_z:.4f} deg/s")
+            return
+
+        corrected_z = raw_z - self._gyro_bias_z
+        now = rospy.get_time()
+        dt = now - self._last_imu_time
+        self._last_imu_time = now
+        if dt > 0.0 and dt < 1.0:
+            self.yaw = self._integrate_yaw(self.yaw, corrected_z, dt)
+        self.quaternion_x = 0.0
+        self.quaternion_y = 0.0
+        self.quaternion_z = math.sin(self.yaw / 2.0)
+        self.quaternion_w = math.cos(self.yaw / 2.0)
 
     def _publish_rear_wheel_pose(self, timer):
         rear_wheel_msg = Odometry()
@@ -142,5 +157,5 @@ class HakuroukunPose:
         return euler
 
     def _integrate_yaw(self, current_orientation, angular_rate, dt):
-        current_orientation += (angular_rate+0.36) * dt
+        current_orientation += math.radians(angular_rate) * dt
         return current_orientation
