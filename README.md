@@ -13,6 +13,7 @@
 # This command is required to run every time the PC is restarted
 xhost +
 ```
+
 Make a X authentication file with proper permissions for the container to use.
 
 ```bash
@@ -20,6 +21,21 @@ Make a X authentication file with proper permissions for the container to use.
 cd ./src/hakuroukun_dockerfiles/
 chmod +x ./install/xauth.sh && ./install/xauth.sh
 ```
+
+> **If xauth.sh says "data" instead of "X11 Xauthority data":** The session
+> cookie is keyed to the hostname, not `:0`. Run:
+> ```bash
+> xauth nlist | sed -e 's/^..../ffff/' | xauth -f /tmp/.docker.xauth nmerge -
+> chmod 644 /tmp/.docker.xauth
+> ```
+> If the container still fails to start with "not a directory" error, the
+> container's internal rootfs has a stale directory at `/tmp/.docker.xauth`
+> from a crashed previous run. Fix with:
+> ```bash
+> docker compose down
+> docker compose up -d
+> catkin_make  # required after down/up wipes build/ and devel/
+> ```
 
 > **Environment note (lab laptop):** The `src/` folder is bind-mounted into the
 > container at `/root/catkin_ws/src`. Edits on the host sync automatically —
@@ -56,28 +72,31 @@ roslaunch hakuroukun_control hakuroukun_control.launch
 ```
     <arg name="simulation" default="false" />
 ```
-2. GPS Rotation angle calibration :
-    - need to calculate and update : ``` <param name="~rotation_angle" value="-90"/> ```
-    - how measure :
-        - The robot in default position is heading in y axis
-        - Run the robot and get coordinate from GPS by manual mode
-        - Calculate the rotation angle by coordinate
+2. GPS Rotation angle calibration:
+    - `rotation_angle` is **hardcoded** in `hakuroukun_pose/hakuroukun_pose/hakuroukun_pose.py`
+      inside `_get_xy_from_latlon()` as `math.radians(172.1)`. The launch file param
+      `~rotation_angle` is dead — the node never reads it.
+    - To recalibrate: drive a straight segment in manual mode, record GPS coordinates,
+      compute the heading angle, and update the hardcoded value directly in
+      `hakuroukun_pose.py`. Do **not** edit `src/hakuroukun_pose/hakuroukun_pose_node.py`
+      — it is never imported.
 
-3. Arduino firmware :
-    - Upload `${hakuroukun_communication}/firmware/motor_control/motor_control.ino` to Arduino with Arduino IDE.
+3. Arduino firmware:
+    - Upload `${hakuroukun_communication}/firmware/bcd_automode/bcd_automode.ino`
+      for autonomous BCD runs (see Real Robot section for full firmware workflow).
 
-4. Bringup execution :
+4. Bringup execution:
 In the 1st terminal
     ```
     docker exec -it hakuroukun-robot bash
-    roslaunch hakuroukun_launch bringup.launch
+    roslaunch hakuroukun_boustrophedon_with_cones bringup_hakuroukun_robot.launch
     ```
 
-4. Controller execution :
+5. Controller execution:
 In the 2nd terminal
     ```
     docker exec -it hakuroukun-robot bash
-    roslaunch hakuroukun_launch experiment_controller.launch
+    roslaunch hakuroukun_boustrophedon_with_cones offline_path_planning_real.launch
     ```
 
 ---
@@ -96,7 +115,7 @@ replaces Tai's online TASP planner from the previous study.
   pursuit-following waypoints).
 - **Online modification (two layers)**:
   - **Layer 1 — Reflex stop** (in `path_follower.py`): LiDAR `FORWARD VETO`
-    at ~0.45 m. Stops the robot in milliseconds for sudden intrusions
+    at 0.70 m. Stops the robot in milliseconds for sudden intrusions
     (a child running into the path, etc.).
   - **Layer 2 — Local replanner** (`local_replanner.py`): Watches LiDAR
     for obstacles that **persist on the path for ≥ 7 seconds**, then splices
@@ -328,7 +347,7 @@ Key differences from simulation:
 - **No AMCL.** Localization comes from RTK-GPS + IMU via `hakuroukun_pose_node`.
 - `map → odom` is published by `map_odom_calibrator.py` — it starts identity
   and is updated at runtime when you click in RViz with the "2D Pose
-  Estimate" tool (same workflow people already use for AMCL initialization).
+  Estimate" tool (same workflow as AMCL).
   No relaunch needed for re-calibration.
 - `odom → base_link` is published by `odom_tf_broadcaster.py` from
   `/hakuroukun_pose/rear_wheel_odometry`.
@@ -347,12 +366,29 @@ planner must not cross.
 - Cone coordinates can be re-extracted from the planning map with
   `scripts/tools/` if needed.
 
+> **obstacle_stop_range note:** `path_follower_config.yaml` sets
+> `obstacle_stop_range: 0.70 m`. The robot will enter HOLD if the LiDAR
+> sees anything within 0.70 m, including physical cones. If the cone
+> positions on the ground don't perfectly match the painted polygons in the
+> map, the robot may trigger unexpected HOLDs near cone boundaries. Watch
+> for this on the first run.
+
 #### 2. Robot setup
 
-**a. Recreate the IMU symlink (every session — does not persist across reboots):**
+**a. Recreate device symlinks (every session — do not persist across reboots):**
 ```bash
-sudo ln -sf /dev/ttyACM1 /dev/imu
+sudo ln -sf /dev/ttyACM0 /dev/imu
 ```
+Confirm all three symlinks exist before launching:
+```bash
+ls /dev/arduino /dev/imu /dev/gps
+```
+
+> **Symlink mapping (confirmed):**
+> - `/dev/ttyACM0` → `/dev/imu`
+> - `/dev/ttyACM2` → `/dev/arduino`
+> - `/dev/gps` — confirm this symlink exists; it is required by `sensor_bringup.launch`
+>   but is not created by the documented setup procedure.
 
 **b. Connect the PC to all sensors and control devices** — RTK-GPS,
 TSND151 IMU, dual RPLIDARs, Arduino. Confirm each device shows up:
@@ -374,22 +410,66 @@ cat /dev/ttyACM*
 > `_get_xy_from_latlon()`). Do **not** edit `src/hakuroukun_pose/hakuroukun_pose_node.py`
 > — it is never imported.
 
-**d. Upload the Arduino firmware.**
+**d. Steering neutral calibration (do this before every experiment day).**
+
+The pot reading when the wheels are physically straight must be consistent
+across both the Arduino firmware and the Python communication node. Duc's
+procedure adapted for the current codestack:
+
+1. Upload `keyboard_mode.ino` via Arduino IDE.
+2. Run keyboard teleop (use `python3` explicitly):
+   ```bash
+   python3 /root/catkin_ws/src/hakuroukun_communication/scripts/keyboard_teleop.py
+   ```
+3. On a flat surface, drive slowly forward and use left/right keys to find
+   the steering position where the robot tracks straight. Hold that position.
+4. Read `pm_st=N` from the Arduino serial output (visible in the teleop
+   terminal log). That N is your neutral pot reading.
+5. Update **both** of the following with the measured value:
+   ```python
+   # hakuroukun_communication_node.py — _corrected_steering_command()
+   c_cw  = <measured>       # neutral for CW/straight (was 525)
+   c_ccw = <measured> + 85  # neutral for CCW (was 610; +85 is the mechanical asymmetry offset)
+   ```
+   ```cpp
+   // bcd_automode.ino
+   #define PM_ST_N  <measured>   // was 560; must match Python c_cw
+   ```
+6. Upload `bcd_automode.ino`. The robot is now ready for autonomous runs.
+
+> **Why both files?** `PM_ST_N` in the Arduino is the center of its
+> range-check window — commands outside `PM_ST_N ± limits` are silently
+> rejected. `c_cw` in Python is what gets sent as "zero steering angle".
+> If they differ, the robot drives with a constant drift and/or some
+> commands are rejected at startup.
+
+**e. Upload the Arduino firmware.**
 Open the Arduino IDE
 (`arduino-ide_2.3.4_Linux_64bit.AppImage` in the downloads folder) and
 upload one of:
 
-- `${hakuroukun_communication}/firmware/motor_control/motor_control.ino` —
-  for autonomous runs (this is what you want for the coverage experiment).
+- `${hakuroukun_communication}/firmware/bcd_automode/bcd_automode.ino` —
+  for autonomous BCD coverage runs. Purpose-built for this launch chain:
+  proper `\n` terminator, motor watchdog (400 ms), 10 Hz serial rate,
+  diagnostic pot-reading feedback. Use this for all thesis experiments.
 - `${hakuroukun_communication}/firmware/manualmode/manualmode.ino` —
-  for manual control (useful during cone placement and rotation-angle
-  calibration drives).
+  for manual button control (useful during cone placement).
+- `${hakuroukun_communication}/firmware/keyboardmode/keyboard_mode/keyboard_mode.ino` —
+  for keyboard teleop via `keyboard_teleop.py` (driving to experiment area
+  and steering neutral calibration).
 
-> **Serial command format note:** `motor_control.ino` expects exactly 10
-> characters (after stripping `\r\n`). `hakuroukun_communication_node.py`
-> pads the command to `"00{dir}{steer:03d}{accel:03d}"` to satisfy this.
-> Do not revert this padding — the old 8-character format caused the Arduino
-> to silently reject every command.
+> **Serial command format:** `bcd_automode.ino` reads with `readStringUntil('\n')`.
+> `hakuroukun_communication_node.py` sends `"0{dir}{steer:03d}{accel:03d}00\r\n"`
+> (10 data chars + `\r\n`). The Arduino strips any trailing `\r` before the
+> length check, so the protocol is robust to both `\n` and `\r\n` line endings.
+> Do not revert to `motor_control.ino` for autonomous runs — it relies on a
+> fragile 2 ms serial timeout instead of a proper terminator, and its motor
+> while-loops can hang indefinitely if the potentiometer cable is loose.
+
+> **Steering range:** Arduino accepts steer values `PM_ST_N - 200` to
+> `PM_ST_N + 290`. Python clamps to `390–850`. Ensure `PM_ST_N` is set
+> consistently with `c_cw` (see calibration above) so the Arduino's
+> acceptance window is centered on the value Python sends as neutral.
 
 #### 3. Run experiment (5 terminals)
 
@@ -399,6 +479,10 @@ Each terminal needs its own `docker exec -it hakuroukun-robot bash`.
 ```bash
 roslaunch hakuroukun_boustrophedon_with_cones bringup_hakuroukun_robot.launch
 ```
+> **GPS timeout:** `hakuroukun_pose_node` calls `wait_for_message('/fix', timeout=10s)`
+> at startup. If the GPS does not have a fix within 10 seconds, the node raises
+> an exception and bringup fails. Always confirm the GPS LED is solid before
+> launching T1.
 
 **T2 — Rosbag (start BEFORE the robot begins moving):**
 ```bash
@@ -434,12 +518,16 @@ down the launches.
 > persistent heading error (alpha ~0.72–1.57 rad) that prevents path following
 > even when GPS and IMU are working correctly. This was the root cause of the
 > failed outdoor run on 2026-06-30.
+>
+> Note: `map_odom_calibrator.py` will warn in the log if `/initialpose` arrives
+> with `frame_id != map`, but it **will still apply the transform**. The warning
+> alone will not save you — check Fixed Frame yourself first.
 
 Even with `rotation_angle` correctly calibrated, two coordinate frames still
 need to be aligned for the robot icon in RViz to land on the correct map pixel:
 
-- **`map` frame** — the painted PGM. (0, 0) is at one corner of
-  `conemap_planning.pgm`, fixed when the map was made.
+- **`map` frame** — the painted PGM. Origin at `[-25, -25]` m (map covers a
+  50×50 m area centered on world origin). Fixed when the map was made.
 - **`odom` frame** — where `hakuroukun_pose_node` anchored its local frame
   on first power-up. Decided by where the robot happens to be at startup.
 
@@ -457,6 +545,11 @@ you'll see the robot icon sitting in the wrong place. The
    `[map_odom_calibrator] map->odom updated: x=… y=… yaw=…`
 6. If the icon drifts later, click again. No relaunch needed.
 
+> **Guard:** `map_odom_calibrator` will not apply `/initialpose` until it has
+> received at least one message on `/hakuroukun_pose/rear_wheel_odometry`. If
+> you click 2D Pose Estimate too early (before T1 is fully up), the click is
+> silently discarded. Wait for `[pf] mode=FORWARD` in T4 before calibrating.
+
 For best results, calibrate while the robot is **stationary** and verify
 against a second known waypoint before starting a coverage run.
 
@@ -465,9 +558,9 @@ against a second known waypoint before starting a coverage run.
 fixed while yaw changes. If the position walks in a circle, the GPS-to-rear-axle
 heading correction in `hakuroukun_pose.py` is not working correctly.
 
-> **LiDAR range note:** The laser merger has `range_min: 1.0 m`. Obstacles
-> closer than 1 m are invisible to `/scan_multi` and will not trigger HOLD
-> or the replanner. Place test obstacles at least 1 m from the robot's path.
+> **LiDAR range note:** The laser merger has `range_min: 0.3 m`. Obstacles
+> closer than 0.3 m are invisible to `/scan_multi`. The path follower's
+> `obstacle_stop_range` is 0.70 m, well within this window.
 
 ---
 
@@ -476,11 +569,17 @@ heading correction in `hakuroukun_pose.py` is not working correctly.
 | Date | File | Bug | Fix |
 |------|------|-----|-----|
 | 2026-07-02 | `hakuroukun_pose.py` | `self.orientation` frozen at 0 — GPS-to-rear-axle correction always applied along heading=0 regardless of actual robot heading, causing up to 0.6 m directional position error on any turn | Replace `self.orientation` with `self.yaw` in `_gps_callback`; initialize `self.yaw = 0.0` in `_register_parameters` |
-| 2026-07-02 | `hakuroukun_communication_node.py` | Serial command was 8 chars; Arduino `length() != 10` check silently rejected every command — robot received no commands at all | Pad format string to `f"00{dir}{steer:03d}{accel:03d}"` (10 chars) |
+| 2026-07-02 | `hakuroukun_communication_node.py` | Serial command was 8 chars; Arduino `length() != 10` check silently rejected every command — robot received no commands at all | Pad format string to `f"0{dir}{steer:03d}{accel:03d}00"` (10 chars) |
 | 2026-07-02 | `hakuroukun_communication_node.py` | `self.direction` reset to 0 at top of every timer tick — caused relay chatter during REVERSE as direction flickered between ticks | Remove unconditional reset; only update direction inside the `cmd_controller_flag` block |
-| 2026-07-02 | `hakuroukun_communication_node.py` | `cmd_controller_flag` never reset to False — flag stayed True permanently after first message | Add `self.cmd_controller_flag = False` inside the `elif` block |
+| 2026-07-02 | `hakuroukun_communication_node.py` | `cmd_controller_flag` never reset to False — flag stayed True permanently after first message | Flag intentionally kept True so last command persists across ticks; direction re-derived each tick from stale message |
 | 2026-07-02 | `local_replanner.py` | `obs_first` array not shifted in lockstep with `obs_grid` during recenters — persistence timestamps desync after any recenter, preventing detour from ever firing | Shift `obs_first` together with `obs_grid` on every recenter |
 | 2026-07-02 | `path_follower.py` | `closest_i` seeded by global argmin on new path arrival during HOLD, jumping past detour arc to geometrically closer post-rejoin baseline tail — robot skipped entire detour | Preserve `closest_i` when new path arrives during HOLD mode |
+| 2026-07-03 | `motor_control.ino` | `readStringUntil("\r\n")` takes a `char`, not a string — Arduino waited for `'\r'` which Python never sent; fell back to 2 ms timeout causing intermittent partial reads and rejected commands | Replaced by `bcd_automode.ino` using `readStringUntil('\n')` with explicit `\r` strip |
+| 2026-07-03 | `motor_control.ino` | `motor_ac()` / `motor_st()` while-loops had no timeout — a loose potentiometer cable or mechanical stop caused the Arduino to hang permanently, ignoring all subsequent serial commands | `bcd_automode.ino` adds a 400 ms watchdog (`MOTOR_TIMEOUT_MS`) that breaks out and sets status `'2'` |
+| 2026-07-03 | `bringup_hakuroukun_robot.launch` | `range_min: 1.0` in laser merger discarded all LiDAR readings under 1 m — `obstacle_stop_range = 0.70 m` could never trigger; HOLD and replanner were effectively blind to close obstacles | Fixed to `range_min: 0.3` |
+| 2026-07-03 | `communication_bringup.launch` | `arduino_controller_rate` defaulted to 1 Hz while `path_follower` runs at 10 Hz — up to 1 s of stale steering commands per cycle (~30 cm of wrong-direction travel at 0.3 m/s) | Default raised to 10 Hz |
+| 2026-07-05 | `hakuroukun_communication_node.py` | Python steer clamp upper bound was 885 but Arduino rejects values above 850 (`PM_ST_N + PM_ST_LIML = 560 + 290`) — silent command rejection on sharp CCW turns | Clamp changed to `max(390, min(850, ...))` |
+| 2026-07-05 | `hakuroukun_pose.py` | `log_data/` directory not created automatically — `open()` in `_log_pose` threw `FileNotFoundError` on first call, crashing the log timer silently | Added `os.makedirs(new_folder, exist_ok=True)` in `_register_log_file()` |
 
 ---
 
@@ -516,18 +615,28 @@ Baseline comparison: Tai's TASP = 52.80%.
   the coverage denominator.
 - `path_follower_config.yaml` ships with `lookahead_distance: 0.8` and
   `max_search_ahead: 25`. Larger values caused oscillation at U-turns.
-- `path_follower_config.yaml` also has `done_dwell_time: 2.0` — the robot
-  must hold the final coverage pose for this many seconds before
-  `/path_follower/done` fires. Filters out end-of-path wiggle (REVERSE /
-  FORWARD recovery oscillation near the final point) so the return leg
-  doesn't trigger during a recovery transition.
-- `local_replanner_config.yaml` has `obstacle_inflate_m` for dynamic
-  obstacles and uses the global `robot_radius` for static wall inflation
-  in the A\* grid. **Keep these separate** — making the wall inflation
-  larger than `robot_radius` will mark baseline path points as occupied
-  in the A\* grid and produce intermittent "Goal cell occupied" errors
-  when computing detours near walls.
+- `path_follower_config.yaml` has `obstacle_stop_range: 0.70 m` (HOLD trigger)
+  and `front_clear_range: 1.0 m` (HOLD→FORWARD clear threshold). The 0.30 m
+  hysteresis between these values prevents mode chatter.
+- `path_follower_config.yaml` does **not** set `done_dwell_time` — the code
+  default of 2.0 s is used. The robot must hold the final coverage pose for
+  2.0 s before `/path_follower/done` fires, filtering out end-of-path wiggle.
+- `local_replanner_config.yaml` has `obstacle_inflate_m: 0.7` for dynamic
+  obstacles. This is intentionally less than `robot_radius: 1.0` — making
+  them equal or larger causes "Goal cell occupied" A* errors when computing
+  detours near walls.
+- `MAX_ACCEL`, `MAX_STEERING`, `MIN_STEERING` in `path_follower.py` are loaded
+  from `/hakuroukun_steering_controller/` namespace, which is **not set** by
+  any real-robot launch file. Code defaults (2.5, ±0.78 rad) are used silently.
+  At ±0.78 rad the steering commands stay within the Arduino's acceptance range.
+- `conemap_planning.yaml` uses an **absolute image path**
+  (`/root/catkin_ws/src/...`). This only works inside the container.
 - All private params on `hakuroukun_pose_node` (`~rotation_angle`,
   `~gps_to_rear_axis`, `~imu_mode`, etc.) are dead — the node never calls
   `rospy.get_param` for any of them. Values in the launch file are silently
   ignored. Do not assume changing them has any effect.
+- `tsnd151_imu_node` publishes on `/imu` (confirmed from source). This matches
+  `hakuroukun_pose.py`'s subscriber topic — no remap needed.
+- `sensor_bringup.launch` has no `/fix` → `/gps/fix` remap.
+  `bringup_hakuroukun_robot.launch` starts `hakuroukun_pose_node` as a `<node>`
+  directly — the old workaround of running it via `rosrun` is no longer needed.
