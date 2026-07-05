@@ -31,7 +31,11 @@
         <remap from="scan_filtered" to="/right_lidar/scan_filtered" />
     </node>
 
-    <!-- LaserScan Multi-Merger -->
+    <!-- LaserScan Multi-Merger
+         IMPORTANT: range_min was 1.0 (the original default) which discarded all
+         readings under 1m.  The path_follower's obstacle_stop_range is 0.45m,
+         so it could never detect close obstacles.  Fixed to 0.3 to match the
+         simulation configuration. -->
     <node pkg="ira_laser_tools" name="laserscan_multi_merger" type="laserscan_multi_merger" output="screen" required="true">
         <param name="destination_frame" value="laser_link" />
         <param name="cloud_destination_topic" value="/merged_cloud" />
@@ -41,19 +45,24 @@
         <param name="angle_max" value="2.61"/>
         <param name="angle_increment" value="0.034906"/>
         <param name="scan_time" value="0.066666" />
-        <param name="range_min" value="1" />
+        <param name="range_min" value="0.3" />
         <param name="range_max" value="25.0" />
     </node>
 
-    <!-- Hakuroukun Pose Node -->
+    <!-- Hakuroukun Pose Node
+         NOTE: The pose node (hakuroukun_pose/hakuroukun_pose/hakuroukun_pose.py)
+         hardcodes gyro-integration for yaw and rotation_angle=172.1 degrees.
+         The ~imu_mode and ~rotation_angle params below are NOT read by the
+         current code — they are kept here only as documentation of the
+         hardware configuration.  If you modify the pose node to read these
+         params, update the values accordingly. -->
     <node name="hakuroukun_pose" pkg="hakuroukun_pose" type="hakuroukun_pose_node" output="screen" required="true">
         <param name="~log" value="true" />
         <param name="~log_folder" value="$(find hakuroukun_pose)/log_data" />
         <param name="~publish_rate" value="0.1" />
-        <param name="~rotation_angle" value="86.5"/> 
+        <!-- Documentation-only params (not read by current code): -->
+        <param name="~rotation_angle" value="172.1"/>
         <param name="~gps_to_rear_axis" value="0.6" />
-        <param name="~imu_mode" value="quaternion" />
-        <param name="~imu_epsilon" value="0.001" />
-        <param name="~imu_calibration_threshold" value="400" />
+        <param name="~imu_mode" value="gyro_integration" />
     </node>
 </launch>
