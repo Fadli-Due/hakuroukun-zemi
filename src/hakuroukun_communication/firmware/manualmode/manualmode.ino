@@ -2,7 +2,7 @@
 //st:steering ac:accel pm:potentiometer
 
 #define SPEED_ST 255    //stモーター速度 (0-255)
-#define SPEED_AC 255    //acモーター速度
+#define SPEED_AC 127    //acモーター速度
 #define PM_ST_N 400     //was 555 //直進時のst pm値 //565 250
 #define PM_ST_LIMR 200  //PM_ST_Nと右操舵限度のpm値の差
 #define PM_ST_LIML 290  //PM_ST_Nと左操舵限度のpm値の差
