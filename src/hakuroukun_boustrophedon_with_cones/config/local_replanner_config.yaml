@@ -40,7 +40,7 @@ local_replanner:
   # 1.2m inflation made small obstacles look like wall segments, blocking A*.
   # 0.9m gives the robot's 0.81m half-width a small safety margin without
   # over-inflating small objects.
-  obstacle_inflate_m: 0.7
+  obstacle_inflate_m: 0.9
 
   # ---- LiDAR gating ---------------------------------------------------------
   # Drop returns closer than this (m) -- avoids the robot's own footprint.
