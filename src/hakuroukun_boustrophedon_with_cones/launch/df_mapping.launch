@@ -5,8 +5,8 @@
          Gmapping, to replace the reused/stale conemap_planning.yaml.
 
          Differs from offline_path_planning_real.launch:
-           - No map_server -- there is no map yet, we're building one.
-           - No map_odom_calibrator.py -- slam_gmapping publishes map->odom
+           - No map_server there is no map yet, we're building one.
+           - No map_odom_calibrator.py slam_gmapping publishes map->odom
              itself as it scan-matches; running both would fight over the
              same transform.
            - odom -> base_link is still driven by odom_tf_broadcaster.py,
@@ -15,7 +15,7 @@
              /hakuroukun_pose/rear_wheel_odometry.
            - No planner / replanner / path follower. Driving is manual via
              keyboard_teleop.py + keyboardmode.ino (flash this BEFORE
-             running -- NOT bcd_automode.ino).
+             running NOT bcd_automode.ino).
 
          Prerequisites:
            - bringup_hakuroukun_robot.launch already running in another
@@ -75,8 +75,7 @@
         <param name="ogain"      value="3.0"/>
         <param name="lskip"      value="0"/>
 
-        <!-- Odometry noise model -- left at gmapping defaults since our
-             "odometry" here is GPS/IMU-derived rather than wheel encoders.
+        <!-- Odometry noise model, left at gmapping defaults since our "odometry" here is GPS/IMU-derived rather than wheel encoders.
              Revisit if the live map shows systematic warping/drift. -->
         <param name="srr" value="0.1"/>
         <param name="srt" value="0.2"/>
