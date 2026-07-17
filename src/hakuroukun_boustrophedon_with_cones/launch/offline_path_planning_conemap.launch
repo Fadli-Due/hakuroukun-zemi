@@ -56,6 +56,7 @@
              (already in the map frame) instead. Do NOT carry this remap over
              to offline_path_planning_real.launch. -->
         <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+        <param name="skip_init_gate" value="true"/>
     </node>
 
     <!-- Online obstacle-avoidance layer: subscribes /planned_path + /scan_multi,
@@ -90,6 +91,13 @@
         <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
         <!-- SIM ONLY: see note above -->
         <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+        <!-- SIM ONLY: bypass the 2D Pose Estimate init handshake (2026-07-06).
+             The real robot gates path_follower on /map_odom_calibrator/initialized,
+             which flips True only after clicking 2D Pose Estimate in RViz. In sim
+             AMCL owns the map frame directly — there is no calibrator to click,
+             so path_follower would hang forever without this bypass.
+             Do NOT set this in offline_path_planning_real.launch. -->
+        <param name="skip_init_gate" value="true"/>
     </node>
 
     <!-- RViz -->
