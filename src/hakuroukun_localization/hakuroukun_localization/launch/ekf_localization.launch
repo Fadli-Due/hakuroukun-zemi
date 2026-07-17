@@ -17,7 +17,7 @@
   <node pkg="robot_localization" type="navsat_transform_node" name="navsat_transform_node" respawn="true">
     <rosparam command="load" file="$(find hakuroukun_localization)/config/navsat_transform_params.yaml"/>
     <!-- <remap from="/gps/fix" to="/fix"/> -->
-    <!-- <remap from="/imu/data" to="/imu/data_raw"/> -->
+    <!-- <remap from="/imu/data" to="/imu"/> -->
     <remap from="/odometry/filtered" to="/odometry/filtered/global"/>
   </node>
 </launch>

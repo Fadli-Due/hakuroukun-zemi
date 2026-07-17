@@ -1,6 +1,6 @@
 #define SPEED_st 255
 #define SPEED_ac 255
-#define PM_st_N 555  //565 250
+#define PM_st_N 502 //565 250
 #define PM_st_LIMR 205
 #define PM_st_LIML 290
 #define PM_ac_N 290  //290
@@ -43,7 +43,7 @@ String direction_mode = "0";  // 0 for forward, 1 for backward
 
 void setup() {
 
-  Serial.setTimeout(2);
+  Serial.setTimeout(50);
   Serial.begin(115200);
 
   pinMode(BUTTON_stR, INPUT);
@@ -77,7 +77,7 @@ void setup() {
 
 void loop() {
   if (Serial.available()) {
-    command = Serial.readStringUntil("\r\n");
+    command = Serial.readStringUntil('\n');
 
     // 0 000 000
     if (command.length() != 10) {

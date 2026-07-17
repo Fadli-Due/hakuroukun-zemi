@@ -1,0 +1,162 @@
+<launch>
+    <!-- HYBRID launch: Gazebo conemap world + real-robot planner stack.
+
+         Purpose: exercise the real-robot init handshake (map_odom_calibrator +
+         gated planner + gated path_follower) against the Gazebo conemap world,
+         without burning an outdoor experiment slot. Lets you catch regressions
+         in the calibrator/gate logic before D-F runs.
+
+         What this launch INCLUDES:
+           - map_server (conemap_planning.yaml, same as real)
+           - map_odom_calibrator.py (real-stack: waits for RViz 2D Pose Estimate)
+           - odom_tf_broadcaster.py (driven by Gazebo's /ground_truth/odometry,
+             since there is no hakuroukun_pose_node in sim)
+           - offline_coverage_planner.py (gate ENFORCED)
+           - local_replanner.py
+           - return_to_start.py
+           - path_follower.py (gate ENFORCED, skip_init_gate NOT set)
+           - RViz with the shared boustrophedon config
+
+         What this launch DOES NOT include (must be launched separately BEFORE):
+           - The Gazebo world + robot spawn (typically gazebo_cones.launch).
+             This must be up before offline_path_planning_conemap_realstack.launch
+             so /ground_truth/odometry, /scan_multi, and the
+             /hakuroukun_steering_controller/cmd_controller topic all exist.
+           - The cleaning simulator (cleaning_simulator.py) if you want a
+             coverage readout — same as the regular conemap sim workflow.
+
+         What is DIFFERENT vs. offline_path_planning_conemap.launch:
+           - No AMCL. map -> odom comes from map_odom_calibrator.py, which
+             starts identity and updates when you click "2D Pose Estimate"
+             in RViz. This mirrors the real outdoor workflow.
+           - skip_init_gate is NOT set on offline_coverage_planner OR
+             path_follower. Both will block until you click 2D Pose Estimate.
+             If you skip the click, nothing happens — that's the point.
+
+         What is DIFFERENT vs. offline_path_planning_real.launch:
+           - odom_tf_broadcaster reads /ground_truth/odometry instead of
+             /hakuroukun_pose/rear_wheel_odometry (no hakuroukun_pose_node in sim).
+           - All planner/replanner/follower nodes have the sim ground_truth
+             remap (same as offline_path_planning_conemap.launch), since those
+             nodes were written to read /hakuroukun_pose/rear_wheel_odometry
+             which does not exist in this hybrid.
+
+         Usage:
+           T1: roslaunch hakuroukun_boustrophedon_with_cones gazebo_cones.launch
+           T2: roslaunch hakuroukun_boustrophedon_with_cones \
+                 offline_path_planning_conemap_realstack.launch
+           T3: (optional) rosrun hakuroukun_boustrophedon_with_cones \
+                 cleaning_simulator.py
+           Then in RViz: click "2D Pose Estimate" at the robot's visible
+           position. Planner + follower unblock, coverage starts. -->
+
+    <!-- Arguments -->
+    <arg name="open_rviz"   default="true"/>
+    <arg name="map_file"    default="$(find hakuroukun_boustrophedon_with_cones)/maps/conemap_planning.yaml"/>
+
+    <!-- Optional initial map->odom offset. Leave at identity; the whole point
+         of this hybrid is to calibrate via the RViz click, same as real. -->
+    <arg name="init_x"   default="0.0"/>
+    <arg name="init_y"   default="0.0"/>
+    <arg name="init_yaw" default="0.0"/>
+
+    <!-- Load planner + follower + replanner params -->
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/boustrophedon_config.yaml" command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/path_follower_config.yaml" command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/local_replanner_config.yaml" command="load" />
+
+    <!-- Map Server -->
+    <node pkg="map_server" type="map_server" name="map_server" args="$(arg map_file)" />
+
+    <!-- map -> odom (dynamic, calibrated via RViz "2D Pose Estimate").
+         Identical to real launch. Starts identity, flips to True + republishes
+         the offset once the user clicks in RViz. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="map_odom_calibrator.py"
+          name="map_odom_calibrator"
+          output="screen">
+        <param name="init_x"   value="$(arg init_x)"/>
+        <param name="init_y"   value="$(arg init_y)"/>
+        <param name="init_yaw" value="$(arg init_yaw)"/>
+    </node>
+
+    <!-- odom -> base_link (driven by Gazebo ground truth in this hybrid).
+         In real: reads /hakuroukun_pose/rear_wheel_odometry (GPS+IMU-derived).
+         In this hybrid: Gazebo does not publish /hakuroukun_pose/rear_wheel_odometry
+         and hakuroukun_pose_node cannot run without the real IMU/GPS hardware,
+         so we point at /ground_truth/odometry — same trick as
+         offline_path_planning_conemap.launch. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="odom_tf_broadcaster.py"
+          name="odom_tf_broadcaster"
+          output="screen">
+        <param name="odom_frame" value="odom"/>
+        <param name="base_frame" value="base_link"/>
+        <param name="odom_topic" value="/ground_truth/odometry"/>
+    </node>
+
+    <!-- Offline Boustrophedon Planner (publishes /planned_path, latched).
+         Gate ENFORCED: waits for /map_odom_calibrator/initialized to flip True
+         before planning. Do NOT add skip_init_gate: true here — the whole
+         point of this hybrid is to test the gate. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="offline_coverage_planner.py"
+          name="offline_coverage_planner"
+          output="screen">
+        <!-- SIM ONLY: same rationale as offline_path_planning_conemap.launch.
+             Node was written to read /hakuroukun_pose/rear_wheel_odometry;
+             remap to Gazebo ground truth since the real pose pipeline is
+             not running in this hybrid. -->
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+    </node>
+
+    <!-- Online obstacle-avoidance layer: subscribes /planned_path + /scan_multi,
+         publishes /desired_path with detours spliced in around persistent
+         obstacles. The path follower tracks /desired_path. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="local_replanner.py"
+          name="local_replanner"
+          output="screen">
+        <!-- SIM ONLY: see note above -->
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+    </node>
+
+    <!-- Return-to-start: waits for /path_follower/done, computes an A* path
+         from the robot's end-of-coverage pose to baseline[0], publishes it on
+         /return_path. local_replanner picks that up and appends it onto
+         current_path so the follower drives the return leg with persistence-
+         gated obstacle avoidance still active. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="return_to_start.py"
+          name="return_to_start"
+          output="screen">
+        <!-- SIM ONLY: see note above -->
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+    </node>
+
+    <!-- Path Follower (tracks /desired_path). Gate ENFORCED: entire main loop
+         waits on /map_odom_calibrator/initialized. Do NOT add
+         skip_init_gate: true here — that would defeat the purpose. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="path_follower.py"
+          name="path_follower"
+          output="screen">
+        <!-- Gazebo controller topic — same as offline_path_planning_conemap.launch -->
+        <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+        <!-- SIM ONLY: see note above -->
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+    </node>
+
+    <!-- RViz -->
+    <group if="$(arg open_rviz)">
+        <node pkg="rviz" type="rviz" name="rviz" required="true"
+              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/boustrophedon_with_cones.rviz">
+            <!-- SIM ONLY: the "odom" Odometry display in boustrophedon_with_cones.rviz
+                 is hardcoded to /hakuroukun_pose/rear_wheel_odometry, which is shared
+                 with the real-robot config. Remap it here (sim-only) rather than
+                 editing the shared .rviz file, since /ground_truth/odometry doesn't
+                 exist on the real robot. -->
+            <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+        </node>
+    </group>
+</launch>

@@ -54,7 +54,7 @@ class TSND151_IMU:
 
         rospy.init_node("tsnd151_imu_node", anonymous=True)
 
-        self.imu_pub = rospy.Publisher("/imu/data_raw", Imu, queue_size=10)
+        self.imu_pub = rospy.Publisher("/imu", Imu, queue_size=10)
 
         self.timer = rospy.Timer(rospy.Duration(1/float(publish_rate)), self._publish_imu_data)
 

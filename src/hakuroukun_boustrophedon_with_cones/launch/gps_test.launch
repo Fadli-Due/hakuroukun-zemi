@@ -1,0 +1,18 @@
+<launch>
+    <arg name="map_file" default="$(find hakuroukun_boustrophedon_with_cones)/maps/conemap_planning.yaml"/>
+
+    <!-- Assumes bringup_hakuroukun_robot.launch is running separately -->
+
+    <node pkg="map_server" type="map_server" name="map_server" args="$(arg map_file)"/>
+
+    <node pkg="hakuroukun_boustrophedon_with_cones" type="map_odom_calibrator.py"
+          name="map_odom_calibrator" output="screen"/>
+
+    <node pkg="hakuroukun_boustrophedon_with_cones" type="odom_tf_broadcaster.py"
+          name="odom_tf_broadcaster" output="screen">
+        <param name="odom_topic" value="/hakuroukun_pose/rear_wheel_odometry"/>
+    </node>
+
+    <node pkg="rviz" type="rviz" name="rviz" required="true"
+          args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/boustrophedon_with_cones.rviz"/>
+</launch>

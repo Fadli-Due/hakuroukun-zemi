@@ -16,6 +16,14 @@ Workflow:
      that offset.
   5. Click again any time the icon drifts. No relaunch needed.
 
+Init handshake (2026-07-06):
+  This node also publishes /map_odom_calibrator/initialized (latched Bool).
+  Starts as False. Flips to True on the first successful /initialpose click
+  and stays True for the rest of the session. path_follower.py gates on this
+  topic — it will not send motion commands until the flag is True. Prevents
+  the 2026-07-05 failure mode where the robot commanded saturated steering
+  on the first tick because the map-frame yaw was uninitialized.
+
 The math: given the current odom-frame pose P_odom and the user-supplied
 map-frame pose P_map, we want a transform T such that T @ P_odom = P_map.
 For 2D (x, y, yaw):
@@ -28,6 +36,7 @@ import rospy
 import tf2_ros
 from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
 
 
@@ -61,6 +70,17 @@ class MapOdomCalibrator:
         )
         rospy.Subscriber(self.odom_topic, Odometry, self.odom_cb, queue_size=10)
 
+        # Latched flag: consumers (path_follower.py) block on this until the
+        # first 2D Pose Estimate click lands. Prevents the robot from moving
+        # with an uninitialized map-frame heading (which would produce a huge
+        # alpha and saturated steering on the first tick — the failure mode
+        # observed on 2026-07-05).
+        self.initialized = False
+        self.init_pub = rospy.Publisher(
+            "/map_odom_calibrator/initialized", Bool, queue_size=1, latch=True
+        )
+        self.init_pub.publish(Bool(data=False))
+
         rospy.Timer(rospy.Duration(1.0 / self.broadcast_rate), self.broadcast)
 
         rospy.loginfo(
@@ -70,6 +90,10 @@ class MapOdomCalibrator:
         rospy.loginfo(
             "[map_odom_calibrator] Listening on /initialpose. Use the "
             "'2D Pose Estimate' tool in RViz to calibrate."
+        )
+        rospy.loginfo(
+            "[map_odom_calibrator] /map_odom_calibrator/initialized = False. "
+            "path_follower.py is gated until the first click."
         )
 
     def odom_cb(self, msg):
@@ -121,6 +145,17 @@ class MapOdomCalibrator:
             self.map_frame, self.odom_frame, self.tx, self.ty, self.tyaw,
             ox, oy, oyaw, px, py, pyaw,
         )
+
+        # Flip the latched init flag on the first successful click. Subsequent
+        # clicks are allowed (drift correction mid-run) and simply re-publish
+        # True — a no-op for subscribers already gated open.
+        if not self.initialized:
+            self.initialized = True
+            rospy.loginfo(
+                "[map_odom_calibrator] initialization complete — "
+                "consumers gated on /map_odom_calibrator/initialized are released."
+            )
+        self.init_pub.publish(Bool(data=True))
 
     def broadcast(self, _event):
         t = TransformStamped()

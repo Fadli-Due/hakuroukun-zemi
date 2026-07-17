@@ -361,6 +361,14 @@ class LocalReplanner:
 
         with self.lock:
             new = np.zeros_like(self.obs_grid)
+            # FIX (2026-07-02): also shift obs_first in lockstep so accumulated
+            # persistence timestamps survive the recenter. Previously only obs_grid
+            # was shifted; obs_first stayed at old positions, causing its entries
+            # for already-seen cells to become misaligned and effectively zeroed on
+            # the next _compute_persistent_mask call — resetting the 7s clock and
+            # preventing detours from ever firing when the robot approached an
+            # obstacle while moving (the common case).
+            new_first = np.zeros_like(self.obs_grid)
             # Copy overlap region from old grid into new grid (shifted).
             src_x0 = max(0, dx_cells)
             src_y0 = max(0, dy_cells)
@@ -373,7 +381,13 @@ class LocalReplanner:
             if src_x1 > src_x0 and src_y1 > src_y0:
                 new[dst_y0:dst_y1, dst_x0:dst_x1] = \
                     self.obs_grid[src_y0:src_y1, src_x0:src_x1]
+                if hasattr(self, "obs_first") and self.obs_first is not None \
+                        and self.obs_first.shape == self.obs_grid.shape:
+                    new_first[dst_y0:dst_y1, dst_x0:dst_x1] = \
+                        self.obs_first[src_y0:src_y1, src_x0:src_x1]
             self.obs_grid = new
+            if hasattr(self, "obs_first") and self.obs_first is not None:
+                self.obs_first = new_first
             self.obs_ox = self.obs_ox + dx_cells * self.map_res
             self.obs_oy = self.obs_oy + dy_cells * self.map_res
 
@@ -514,10 +528,6 @@ class LocalReplanner:
         return lo + int(np.argmin(d2))
 
     def _find_blocked_span(self, path, i_start, persistent_mask):
-        """Scan forward from i_start. Return (first_blocked, last_blocked)
-        in path-index space, or (None, None) if no blockage within lookahead.
-
-        Looks ahead at most lookahead_check_m metres along the path."""
         if not path:
             return None, None
         max_steps = int(self.lookahead_check_m / self.densify_step)
@@ -526,7 +536,9 @@ class LocalReplanner:
         blocked = []
         for i in range(i_start, i_end):
             x, y = path[i]
-            if self._point_in_mask(x, y, persistent_mask):
+            is_dynamic = self._point_in_mask(x, y, persistent_mask)
+            is_static  = self._point_in_static_wall(x, y)   # ← new
+            if is_dynamic or is_static:
                 blocked.append(i)
 
         if not blocked:
@@ -540,6 +552,16 @@ class LocalReplanner:
         if gx < 0 or gx >= self.obs_grid_w or gy < 0 or gy >= self.obs_grid_h:
             return False
         return bool(mask[gy, gx])
+    
+    def _point_in_static_wall(self, x, y):
+        """Is (x,y) in the inflated static wall zone (i.e. blocked by the map)?"""
+        if self.static_inflated is None:
+            return False
+        gx = int((x - self.map_ox) / self.map_res)
+        gy = int((y - self.map_oy) / self.map_res)
+        if gx < 0 or gx >= self.map_w or gy < 0 or gy >= self.map_h:
+            return True   # out of map = treat as wall
+        return not bool(self.static_inflated[gy, gx])
 
     # ====================================================================
     #  DETOUR

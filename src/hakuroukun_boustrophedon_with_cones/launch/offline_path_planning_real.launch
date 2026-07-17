@@ -75,7 +75,7 @@
           type="path_follower.py"
           name="path_follower"
           output="screen">
-        <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+        
     </node>
 
     <!-- Return-to-Start: waits for /path_follower/done, then A*-routes

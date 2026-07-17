@@ -36,7 +36,8 @@ class PurePursuitNode:
         rp = rospy.get_param("reverse", {})
         self.rev_enable   = rp.get("enable", True)
         self.rev_speed    = abs(rp.get("speed", 0.25))
-        self.rev_max_t    = rp.get("max_duration", 2.0)
+        self.rev_max_t    = rp.get("max_duration", 4.0)
+        self.min_rev_dwell = rp.get("min_dwell", 1.5)
         self.front_stop   = rp.get("front_stop_range", 0.8)
         self.front_clear  = rp.get("front_clear_range", 1.2)
         self.front_fov    = math.radians(rp.get("front_fov_deg", 90))
@@ -93,7 +94,7 @@ class PurePursuitNode:
         rospy.Subscriber('/scan_multi', LaserScan, self.scan_cb)
         rospy.Subscriber('/stop_signal', Bool, self.stop_cb)
 
-        cmd_topic = rospy.get_param("~cmd_topic", "/hakuroukun_steering_controller/cmd_controller")
+        cmd_topic = rospy.get_param("~cmd_topic", "/cmd_controller")
         self.cmd_pub = rospy.Publisher(cmd_topic, Float64MultiArray, queue_size=10)
 
         # /path_follower/done: latched Bool published exactly once when the
@@ -167,11 +168,33 @@ class PurePursuitNode:
         # across restricted zones. (Observed: robot entered cone zone after
         # first detour fired, 2026-06-23 Case 3.)
         #
-        # Fix: seed closest_i at the path point nearest the robot's current
-        # pose. O(N) in path length, but only runs when a new path arrives
-        # (at most a few times per run). For the initial path (no prior pose),
-        # falls back to 0 as before.
-        if self.current_pose and self.path_points:
+        # FIX (2026-07-02): preserve closest_i when a detour path arrives
+        # during HOLD.
+        #
+        # A detour path has the shape:
+        #   baseline[:backstep] + detour_arc + baseline[rejoin:]
+        # The robot is physically at backstep when HOLD fires. A global argmin
+        # over the full new path can pick a post-rejoin baseline point that is
+        # geometrically closer to the robot than backstep (the detour arc curves
+        # away from the robot, while the baseline tail continues nearby). This
+        # causes closest_i to jump past the entire detour arc, and the robot
+        # skips the detour completely. (Observed: detour loop visible in RViz
+        # but robot continued down the original lane, 2026-07-02.)
+        #
+        # Fix: when a new path arrives while in HOLD, keep the existing
+        # closest_i (clamped to the new path length). The robot is stationary
+        # at that index — it is always a valid, free point on the new path
+        # (local_replanner guarantees backstep >= i_now). Global argmin is only
+        # used for the initial path and for paths arriving outside of HOLD
+        # (e.g. return-to-start leg), where no detour arc is present.
+        if self.mode == "HOLD" and self.path_points:
+            # Clamp in case the new path is shorter (shouldn't happen for
+            # detour splices, which always add points, but be safe).
+            self.closest_i = min(self.closest_i, len(self.path_points) - 1)
+            rospy.loginfo(
+                f"[path_follower] new path ({len(self.path_points)} pts): "
+                f"closest_i preserved at {self.closest_i} (HOLD — detour splice)")
+        elif self.current_pose and self.path_points:
             rx, ry, _ = self.current_pose
             best_i, best_d2 = 0, float('inf')
             for i, (px, py) in enumerate(self.path_points):
@@ -337,13 +360,15 @@ class PurePursuitNode:
 
             else:  # REVERSE
                 duration = now - (self.rev_start if self.rev_start is not None else now)
-
+                if duration < self.min_rev_dwell:
+                    pass  # stay in REVERSE
                 # Stop reversing when we have space again OR we've reversed long enough
-                if (self.min_front > self.front_clear) or (duration > self.rev_max_t):
+                elif (self.min_front > self.front_clear) or (duration > self.rev_max_t):
                     self.mode = "FORWARD"
                     self.cooldown_until = now + self.rev_cooldown
                     self.stuck_start = None
-                    rospy.loginfo("MODE → FORWARD (recovered)")
+                    rospy.loginfo(
+                        f"MODE → FORWARD (recovered, rev_dur={duration:.2f}s)")
 
             # ── Command selection ────────────────────────────────────────
             if self.mode == "REVERSE":
@@ -450,8 +475,8 @@ class PurePursuitNode:
         new_speed = self.previous_speed + speed_diff
         self.previous_speed = new_speed
 
-        if new_speed < 0.05:
-            new_speed = 0.05
+        if abs(new_speed) < 0.05:
+            new_speed = 0.05 if new_speed >= 0 else -0.05
 
         return new_speed, steering
 

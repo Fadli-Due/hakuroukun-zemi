@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import math
 import rospy
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import TransformStamped
@@ -28,7 +29,14 @@ class OdomTFBroadcaster:
         t.transform.translation.y = msg.pose.pose.position.y
         t.transform.translation.z = msg.pose.pose.position.z
 
-        t.transform.rotation = msg.pose.pose.orientation
+        q = msg.pose.pose.orientation
+        magnitude = math.sqrt(q.x**2 + q.y**2 + q.z**2 + q.w**2)
+        if magnitude < 1e-6:
+            return
+        t.transform.rotation.x = q.x / magnitude
+        t.transform.rotation.y = q.y / magnitude
+        t.transform.rotation.z = q.z / magnitude
+        t.transform.rotation.w = q.w / magnitude
         self.br.sendTransform(t)
 
 if __name__ == "__main__":

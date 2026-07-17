@@ -93,6 +93,11 @@ class OfflineCoveragePlanner:
         # which the path follower tracks. This separation lets us cleanly
         # distinguish "offline planned" from "online executed" in the thesis.
         self.path_pub = rospy.Publisher('/planned_path', Path, queue_size=1, latch=True)
+        # Publish the BCD-inflated free area (m^2) so cleaning_simulator.py
+        # can use it as the denominator instead of counting raw map free cells.
+        from std_msgs.msg import Float32
+        self.valid_area_pub = rospy.Publisher(
+            '/bcd_valid_area_m2', Float32, queue_size=1, latch=True)
         rospy.Subscriber('/map', OccupancyGrid, self.map_cb)
         rospy.Subscriber('/hakuroukun_pose/rear_wheel_odometry', Odometry, self.odom_cb)
 
@@ -152,8 +157,11 @@ class OfflineCoveragePlanner:
 
         grid, crop_ox, crop_oy, res = self._prepare_grid(self.map_data)
         free = grid == 0                                  # inflated free space
-        rospy.loginfo("[BCD] cropped grid %dx%d, %d free cells"
-                      % (free.shape[1], free.shape[0], int(free.sum())))
+        valid_area_m2 = float(free.sum()) * res * res
+        rospy.loginfo("[BCD] cropped grid %dx%d, %d free cells (valid area = %.2f m^2)"
+                      % (free.shape[1], free.shape[0], int(free.sum()), valid_area_m2))
+        from std_msgs.msg import Float32
+        self.valid_area_pub.publish(Float32(data=valid_area_m2))
 
         # The robot may spawn inside the inflation band of a wall. Snap the
         # start onto the nearest genuinely-free cell so A* has a valid start.
