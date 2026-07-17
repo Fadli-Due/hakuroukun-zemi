@@ -36,7 +36,8 @@ class PurePursuitNode:
         rp = rospy.get_param("reverse", {})
         self.rev_enable   = rp.get("enable", True)
         self.rev_speed    = abs(rp.get("speed", 0.25))
-        self.rev_max_t    = rp.get("max_duration", 2.0)
+        self.rev_max_t    = rp.get("max_duration", 4.0)
+        self.min_rev_dwell = rp.get("min_dwell", 1.5)
         self.front_stop   = rp.get("front_stop_range", 0.8)
         self.front_clear  = rp.get("front_clear_range", 1.2)
         self.front_fov    = math.radians(rp.get("front_fov_deg", 90))
@@ -359,13 +360,15 @@ class PurePursuitNode:
 
             else:  # REVERSE
                 duration = now - (self.rev_start if self.rev_start is not None else now)
-
+                if duration < self.min_rev_dwell:
+                    pass  # stay in REVERSE
                 # Stop reversing when we have space again OR we've reversed long enough
-                if (self.min_front > self.front_clear) or (duration > self.rev_max_t):
+                elif (self.min_front > self.front_clear) or (duration > self.rev_max_t):
                     self.mode = "FORWARD"
                     self.cooldown_until = now + self.rev_cooldown
                     self.stuck_start = None
-                    rospy.loginfo("MODE → FORWARD (recovered)")
+                    rospy.loginfo(
+                        f"MODE → FORWARD (recovered, rev_dur={duration:.2f}s)")
 
             # ── Command selection ────────────────────────────────────────
             if self.mode == "REVERSE":
@@ -472,8 +475,8 @@ class PurePursuitNode:
         new_speed = self.previous_speed + speed_diff
         self.previous_speed = new_speed
 
-        if new_speed < 0.05:
-            new_speed = 0.05
+        if abs(new_speed) < 0.05:
+            new_speed = 0.05 if new_speed >= 0 else -0.05
 
         return new_speed, steering
 
