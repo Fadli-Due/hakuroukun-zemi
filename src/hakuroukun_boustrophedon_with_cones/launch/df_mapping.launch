@@ -28,7 +28,7 @@
 
     <arg name="open_rviz" default="true"/>
 
-    <!-- odom -> base_link (live, from hakuroukun_pose_node) -->
+    <!-- odom -> base_link (live, from hakuroukun_posenode) -->
     <node pkg="hakuroukun_boustrophedon_with_cones"
           type="odom_tf_broadcaster.py"
           name="odom_tf_broadcaster"
