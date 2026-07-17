@@ -2,16 +2,6 @@
 # -*- coding: utf-8 -*-
 # Copyright 2024 - ISE Mobile Robot Group. All Rights Reserved.
 # Modified by Fadli Due Ramandavito (2026)
-#
-# Changelog vs previous version:
-#   1. Serial command now ends with \r\n — Arduino reads with readStringUntil('\n')
-#      instead of relying on a 2ms timeout.  Eliminates partial-read failures.
-#   2. Default controller_rate raised from 1 Hz to 10 Hz to match path_follower's
-#      control_rate.  (Override via communication_bringup.launch param.)
-#   3. Serial read uses readline() with a short timeout and logs motor watchdog
-#      warnings ('2' status) from bcd_automode.ino.
-#   4. Original three fixes preserved (10-char pad, direction not reset, flag handling).
-
 import serial
 import rospy
 from geometry_msgs.msg import Twist
@@ -69,10 +59,20 @@ class HakuroukunCommunicationNode(object):
         self.direction = 0  # 0 = forward, 1 = reverse
         self.previous_steering_angle = 0.0
 
+        # Hysteresis state for curve-switching (see _corrected_steering_command).
+        # committed_direction_ccw starts as None so the very first command
+        # picks a direction unconditionally (no prior commitment to compare
+        # against).
+        self.committed_direction_ccw = None
+        self.committed_goal_angle = 0.0
+        self.STEERING_HYSTERESIS_RAD = 0.03  # tune if oscillation persists
+
     def run(self) -> None:
         rospy.spin()
 
     def _timer_callback(self, event) -> None:
+        if not self.cmd_vel_flag and not self.cmd_controller_flag:
+            return
         acceleration_command, steering_command = self._apply_indentification()
 
         # Format: "0" + dir(1) + steering(3) + acceleration(3) + "00" = 10 chars
@@ -97,6 +97,22 @@ class HakuroukunCommunicationNode(object):
                         rospy.logwarn(f"Arduino rejected command: {response}")
                     else:
                         rospy.logdebug(f"PM feedback: {response}")
+
+                    # Parse gear + pending state from the diagnostic tail.
+                    # Firmware format: "...,gear=<0|1>,pend=<0|1>"
+                    if ',gear=' in response:
+                        try:
+                            gear_actual = response.split(',gear=')[1][0]
+                            pend_str = response.split(',pend=')[1][0] \
+                                if ',pend=' in response else '?'
+                            if gear_actual != str(self.direction):
+                                rospy.logwarn_throttle(
+                                    1.0,
+                                    f"[comm] GEAR MISMATCH: "
+                                    f"commanded={self.direction} "
+                                    f"actual={gear_actual} pending={pend_str}")
+                        except (IndexError, ValueError):
+                            pass
         except Exception as e:
             rospy.logwarn_throttle(5.0, f"Serial read error: {e}")
 
@@ -143,43 +159,38 @@ class HakuroukunCommunicationNode(object):
 
         # Acceleration command
         if linear_velocity == 0:
-            acceleration_command = 290
+            acceleration_command = 237   # neutral, pedal released
         else:
-            acceleration_command = (linear_velocity + 1) * 500
-        acceleration_command = max(290, min(680, acceleration_command))
+            raw_accel = 237 + linear_velocity * 1428
+            acceleration_command = max(raw_accel, 550)
+        acceleration_command = max(237, min(750, acceleration_command))
 
         # Steering command (with asymmetric correction)
         steering_val = self._corrected_steering_command(steering_angle)
         steering_command = round(steering_val)
-        steering_command = max(390, min(850, steering_command))
+        steering_command = max(315, min(688, steering_command)) 
 
         return int(acceleration_command), int(steering_command)
 
     def _corrected_steering_command(self, goal_angle_rad: float) -> float:
-        """
-        Applies asymmetric quadratic correction.
-        - CW follows:    p(theta) =  69.86 theta^2 + 317.31 theta + 525
-        - CCW follows:   p(theta) = -86.29 theta^2 + 317.31 theta + 610
-        """
-        try:
-            current_angle_rad = self.previous_steering_angle
-        except AttributeError:
-            self.previous_steering_angle = 0.0
-            current_angle_rad = 0.0
+        delta = goal_angle_rad - self.committed_goal_angle
+        if (self.committed_direction_ccw is None
+                or abs(delta) > self.STEERING_HYSTERESIS_RAD):
+            self.committed_direction_ccw = (delta > 0)
+            self.committed_goal_angle = goal_angle_rad
 
-        is_counterclockwise = goal_angle_rad > current_angle_rad
-
+        # Kept in sync for any other code path that still reads this attr.
         self.previous_steering_angle = goal_angle_rad
 
-        if is_counterclockwise:
+        if self.committed_direction_ccw:
             a_ccw = -86.29
             b_ccw = 317.31
-            c_ccw = 610
+            c_ccw = 720
             return a_ccw * (goal_angle_rad ** 2) + b_ccw * goal_angle_rad + c_ccw
         else:
             a_cw = 69.86
             b_cw = 317.31
-            c_cw = 525
+            c_cw = 635
             return a_cw * (goal_angle_rad ** 2) + b_cw * goal_angle_rad + c_cw
 
 
