@@ -1,5 +1,6 @@
-rotation_angle_deg: 165.213
-calibrated_at: '2026-07-17T09:00:00'  # use actual current time
+rotation_angle_deg: -165.213
+imu_yaw_offset_deg: 112.06
+calibrated_at: '2026-07-17T09:XX:00'  # actual time
 segments_used: 3
 segment_agreement_deg: 0.97
 candidate_angles_deg:
@@ -7,4 +8,4 @@ candidate_angles_deg:
 - -165.07
 - -165.77
 manual_override: true
-override_note: "Script auto-run rejected (spread=5.34deg across 5 candidates). Manually selected tight subcluster of 3; excluded -167.80 and -170.14 as outliers. See session log 2026-07-17 for full candidate set and cross-session drift pattern (-173.8 -> -169.4 -> -165.2 across three sessions same day)."
+override_note: "GPS angle: manual subcluster override, see earlier note. IMU yaw offset: recalibrated via raw-IMU + rear-wheel-odometry straight drive (~9.5m) after discovering gps_rotation_calibrator.py's shutdown write had silently dropped the prior imu_yaw_offset_deg=123.1 value (script doesn't merge, only overwrites). New offset derived: bearing_map=82.28deg, raw_imu_yaw=-19.78deg -> offset=102.06deg."
