@@ -1,45 +1,95 @@
 // bcd_automode.ino
-// Purpose-built Arduino Mega 2560 firmware for BCD autonomous coverage runs.
+// Autonomous-mode firmware for the Hakuroukun ride-on cleaning robot,
+// running BCD (Boustrophedon Cell Decomposition) coverage path planning.
+// Target: Arduino Mega 2560 flashed to /dev/arduino.
 //
-// Designed to pair with:
-//   - hakuroukun_communication_node.py  (sends serial commands)
-//   - bringup_hakuroukun_robot.launch   (brings up sensors + this node)
-//   - offline_path_planning_real.launch (planner + follower + replanner)
+// ─── SERIAL PROTOCOL (115200 baud) ──────────────────────────────────────────
+//   Request  (from hakuroukun_communication_node.py, 12 bytes on the wire):
+//     "0" + D + SSS + AAA + "00" + "\r\n"
+//        D   = 1 char, '0' = FORWARD, '1' = REVERSE
+//        SSS = 3-digit steering pot target (000-999)
+//        AAA = 3-digit accel    pot target (000-999)
+//        Leading '0' and trailing "00" are protocol padding.
+//        "\r\n" is the message terminator (Python appends it explicitly).
+//   Reply    (variable length, ends with '\n'):
+//     ST + D + SSS + AAA + ",pm_st=" + N + ",pm_ac=" + N
+//        ST  = '0' OK, '1' malformed (length != 10), '2' watchdog was firing
+//              before this message arrived (pedal was released; now recovered)
+//        pm_st / pm_ac = current pot readings, for online diagnostics.
+//   The receive side uses readStringUntil('\n') + trim() to strip '\r'.
+//   This is the newer contract added in hakuroukun_communication_node.py
+//   (Jul 2026 revision) — it replaces the older 2-ms-gap-based read used
+//   by Tai's motor_control.ino, which was prone to partial-read failures
+//   under load.
 //
-// Serial protocol (115200 baud):
-//   RX from Python:  "0<dir:1><steer:3><accel:3>00\n"   (10 data chars + \n)
-//   TX to Python:    "<status:1><dir:1><steer:3><accel:3>,pm_st=<N>,pm_ac=<N>\n"
+// ─── CALIBRATION (from keyboardmode.ino, 2026-07-07) ────────────────────────
+//   Steering neutral   PM_ST_N   = 400
+//   Steering right lim PM_ST_LIMR= 200  -> min pot = 200
+//   Steering left  lim PM_ST_LIML= 290  -> max pot = 690
+//   Accel neutral      PM_AC_N   = 235  (pedal fully released)
+//   Accel press   lim  PM_AC_LIMU= 500  -> max pot = 735
+//   Accel release lim  PM_AC_LIMD=  20  -> min pot = 215
+//   These values were tuned by driving the robot manually with keyboard
+//   teleop and observing pot readings at the mechanical stops. Do NOT edit
+//   without re-running the manual calibration procedure.
 //
-//   dir:    '0' = forward, '1' = reverse
-//   steer:  3-digit potentiometer target (valid: 390–885)
-//   accel:  3-digit potentiometer target (valid: 270–680)
-//   status: '0' = OK, '1' = bad command, '2' = motor watchdog tripped
+//   HEADS-UP: the rad->pot conversion in hakuroukun_communication_node must
+//   also match this calibration (PM_ST_N=400 and the asymmetric envelope).
+//   Verify c_cw/c_ccw / slope constants in that node before an experiment.
 //
-// Differences from motor_control.ino:
-//   1. readStringUntil('\n') — proper single-char terminator, no timeout gambling
-//   2. Motor watchdog: while-loops break after MOTOR_TIMEOUT_MS to prevent hangs
-//   3. SPEED_AC = 180 (70% PWM) — less aggressive than 255, avoids pot overshoot
-//   4. Diagnostic response includes live pot readings for field debugging
-//   5. Heartbeat LED blink confirms firmware is alive even with no serial traffic
+// ─── SAFETY BEHAVIORS (new in BCD firmware; not in Tai's motor_control) ─────
+//   1. Startup hold: motors are driven to neutral for STARTUP_HOLD_MS
+//      before serial parsing begins. Prevents lurch if a ROS message
+//      arrives while the pot control loop hasn't converged.
+//   2. Serial watchdog: if no valid message arrives for WATCHDOG_MS, the
+//      accel target is forced to neutral (pedal released). Steering target
+//      is held at its last value — snapping steering to zero mid-turn
+//      could destabilize the vehicle worse than coasting to a stop.
+//   3. Direction-change interlock: FWD<->REV relay flip is deferred
+//      (non-blocking) until the pedal pot is within RELAY_SAFE_MARGIN of
+//      neutral. Prevents lurch on gear shift with pedal engaged. Times out
+//      after DIR_CHANGE_TIMEOUT_MS if the pedal never releases.
+//   4. Decoupled envelope rejection: if only the steer target is out of
+//      range, only the steer target snaps to neutral; the accel target is
+//      preserved. Same axis-independence for accel. Tai's version reset
+//      BOTH on either violation, which caused a bad steer value to release
+//      the pedal mid-turn.
 //
-// Original motor driver code by Duc-san (c) 2024 ISE Mobile Robot Group
-// bcd_automode.ino by Fadli Due Ramandavito, July 2026
+// ─── STATUS LEDS ────────────────────────────────────────────────────────────
+//   LED_ST (D40)  ON when the last received message had an out-of-envelope
+//                 value (visible clamp fired). Blinks off on the next clean
+//                 message.
+//   LED_AC (D41)  ON when the gear is REVERSE (mirrors keyboardmode.ino).
+//
+// ─── PROVENANCE ─────────────────────────────────────────────────────────────
+//   Original manualmode.ino ..... Dinh Ngoc Duc (Duc-san), ISE MRG, 2024
+//   motor_control.ino (BCD base). Nguyen Van Tai,          ISE MRG, 2025
+//   bcd_automode.ino ............ Fadli Due Ramandavito,   ISE MRG, 2026
+// ────────────────────────────────────────────────────────────────────────────
 
 // ─── Tuning ─────────────────────────────────────────────────────────────────
 
-#define SPEED_ST          255   // Steering motor PWM (0-255) — fast is fine, steering has hard stops
-#define SPEED_AC          180   // Accel motor PWM — 70%, gentler than 255 to avoid pot overshoot
-#define PM_ST_N           525   // Steering neutral potentiometer (safety fallback only;
-                                //   Python calibrates its own CW=525 / CCW=610 centers)
-#define PM_ST_LIMR        200   // Right travel limit offset from neutral
-#define PM_ST_LIML        290   // Left travel limit offset from neutral
-#define PM_AC_N           290   // Accel neutral potentiometer (no throttle)
-#define PM_AC_LIMU        390   // Max throttle offset from neutral
-#define PM_AC_LIMD         20   // Min (pedal release) offset from neutral
-#define MOTOR_TIMEOUT_MS  400   // Max time (ms) a motor while-loop can run before breaking out
-#define MOTOR_REFRESH_MS 1000   // Re-drive motors even if command unchanged (fights pot drift)
+#define SPEED_ST                 255   // Steering motor PWM (0-255)
+#define SPEED_AC                 127   // Accel motor PWM (0-255). CAP — higher
+                                       // risks damaging the pedal-actuator
+                                       // frame per 2026-07-07 manual testing.
 
-// ─── Pin Assignments (identical to motor_control.ino / manualmode.ino) ──────
+#define PM_ST_N                  606   // Steering neutral pot value
+#define PM_ST_LIMR               92   // Right envelope: PM_ST_N - LIMR = 200
+#define PM_ST_LIML               301   // Left  envelope: PM_ST_N + LIML = 690
+#define PM_AC_N                  237   // Accel neutral (pedal fully released)
+#define PM_AC_LIMU               524   // Press   envelope: PM_AC_N + LIMU = 735
+#define PM_AC_LIMD                20   // Release envelope: PM_AC_N - LIMD = 215
+
+#define REFRESH_MS              1000   // Motor closed-loop keep-alive interval
+#define WATCHDOG_MS              500   // Release pedal if no msg for this long
+#define STARTUP_HOLD_MS         1000   // Hold neutral for this long at boot
+#define RELAY_SAFE_MARGIN         30   // Pedal must be within this of neutral
+#define DIR_CHANGE_TIMEOUT_MS   2000   // Max wait for pedal release before
+#define MOTOR_TIMEOUT_MS         400
+                                       // abandoning a direction change
+
+// ─── Pin Assignments (matches motor_control.ino + keyboardmode.ino) ─────────
 
 const int MD_ST_DIR    =  6;
 const int MD_ST_PWM    =  7;
@@ -48,231 +98,248 @@ const int MD_AC_PWM    = 12;
 
 const int LED_ST       = 40;
 const int LED_AC       = 41;
-
 const int RELAY_ALARM  = 50;
 const int RELAY_MOTOR  = 51;
 
+const int POT_ST_PIN   = 0;   // A0
+const int POT_AC_PIN   = 1;   // A1
+
 // ─── State ──────────────────────────────────────────────────────────────────
 
-int com_st = PM_ST_N;          // Current steering target
-int com_ac = PM_AC_N;          // Current accel target
-int pre_st = 0;                // Previous steering target (for change detection)
-int pre_ac = 0;                // Previous accel target
-unsigned long time_st = 0;     // Last steering drive timestamp
-unsigned long time_ac = 0;     // Last accel drive timestamp
+int pm_st = 0, pm_ac = 0;                 // Latest raw pot readings
 
-String direction      = "0";  // '0' forward, '1' reverse
-String direction_mode = "0";  // Tracks relay state to avoid redundant switching
+int com_st = PM_ST_N;                     // Current steering pot target
+int com_ac = PM_AC_N;                     // Current accel    pot target
+int pre_st = 0, pre_ac = 0;               // Previous targets (for closed loop)
 
-// Watchdog status — '0' = OK, '2' = a motor timed out on last cycle
-char motor_status = '0';
+unsigned long time_st = 0, time_ac = 0;   // Last motor refresh timestamps
+unsigned long last_serial_ms = 0;         // Last VALID message timestamp
 
-// Heartbeat
-unsigned long last_heartbeat = 0;
-bool led_state = false;
+String command = "";
+String direction_mode = "0";              // Latched gear: "0" FWD, "1" REV
+String control_status = "0";              // Echoed back to ROS
+
+bool           envelope_violation   = false;   // For LED_ST
+bool           direction_pending    = false;   // Interlock state
+String         pending_direction    = "0";
+unsigned long  dir_change_start_ms  = 0;
+bool           watchdog_was_active  = false;   // Latch: fired since last msg
+bool           motor_watchdog_tripped = false;
+
+// ─── Forward Declarations ───────────────────────────────────────────────────
+
+void motor_st(int PM_st_REF);
+void motor_ac(int PM_ac_REF);
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
 
 void setup() {
+  // 50 ms cap on readStringUntil (early-exits on '\n' — which the Python
+  // side always sends). At 10 Hz command rate we have 100 ms/cycle, so
+  // 50 ms is a comfortable ceiling for partial-message tolerance.
+  Serial.setTimeout(50);
   Serial.begin(115200);
-  Serial.setTimeout(50);       // 50ms read timeout — generous, \n arrives fast
 
-  pinMode(MD_ST_DIR, OUTPUT);
-  pinMode(MD_ST_PWM, OUTPUT);
-  pinMode(MD_AC_DIR, OUTPUT);
-  pinMode(MD_AC_PWM, OUTPUT);
+  pinMode(MD_ST_DIR, OUTPUT);   pinMode(MD_ST_PWM, OUTPUT);
+  pinMode(MD_AC_DIR, OUTPUT);   pinMode(MD_AC_PWM, OUTPUT);
+  pinMode(LED_ST, OUTPUT);      pinMode(LED_AC, OUTPUT);
+  pinMode(RELAY_ALARM, OUTPUT); pinMode(RELAY_MOTOR, OUTPUT);
 
-  pinMode(LED_ST, OUTPUT);
-  pinMode(LED_AC, OUTPUT);
+  digitalWrite(MD_ST_DIR, LOW);   analogWrite(MD_ST_PWM, 0);
+  digitalWrite(MD_AC_DIR, LOW);   analogWrite(MD_AC_PWM, 0);
+  digitalWrite(LED_ST, LOW);      digitalWrite(LED_AC, LOW);
+  digitalWrite(RELAY_ALARM, LOW); digitalWrite(RELAY_MOTOR, LOW);   // FWD
 
-  pinMode(RELAY_ALARM, OUTPUT);
-  pinMode(RELAY_MOTOR, OUTPUT);
+  // Startup safety hold: drive both motors to neutral for a moment so we
+  // don't accept ROS commands before the pot control loop has converged.
+  unsigned long t_boot = millis();
+  while (millis() - t_boot < STARTUP_HOLD_MS) {
+    motor_st(PM_ST_N);
+    motor_ac(PM_AC_N);
+  }
 
-  // Start in safe state
-  digitalWrite(MD_ST_DIR, LOW);
-  digitalWrite(MD_ST_PWM, LOW);
-  digitalWrite(MD_AC_DIR, LOW);
-  digitalWrite(MD_AC_PWM, LOW);
-
-  digitalWrite(LED_ST, LOW);
-  digitalWrite(LED_AC, LOW);
-
-  // Relays off = forward mode
-  digitalWrite(RELAY_ALARM, LOW);
-  digitalWrite(RELAY_MOTOR, LOW);
-
-  Serial.println("bcd_automode ready");
+  // Prime the watchdog so it doesn't fire before the first message.
+  last_serial_ms = millis();
 }
 
 // ─── Main Loop ──────────────────────────────────────────────────────────────
 
 void loop() {
-  char cmd_status = '0';       // Per-cycle command parse status
-
-  // ── 1. Read serial command ──
+  // 1. Parse any pending serial command (non-blocking).
   if (Serial.available()) {
-    String command = Serial.readStringUntil('\n');
-
-    // Strip trailing \r if present (Python may send \r\n)
-    if (command.length() > 0 && command.charAt(command.length() - 1) == '\r') {
-      command = command.substring(0, command.length() - 1);
-    }
+    command = Serial.readStringUntil('\n');     // consumes the '\n'
+    command.trim();                             // strips trailing '\r'
+    envelope_violation = false;                 // reset for this cycle
 
     if (command.length() != 10) {
-      cmd_status = '1';        // Bad length — keep previous com_st/com_ac
+      // Malformed: signal, don't touch com_st/com_ac, don't reset watchdog.
+      control_status = "1";
     } else {
-      // Parse fields:  0 <dir:1> <steer:3> <accel:3> 00
-      //                ^0 ^1     ^2-4      ^5-7      ^8-9
-      direction = command.substring(1, 2);
+      // A clean message arrived. If the watchdog had been firing between
+      // the previous message and this one, echo status '2' so the Python
+      // side logs a "watchdog tripped" warning — otherwise silent recovery
+      // hides the fact that the robot lost heartbeat.
+      control_status = (watchdog_was_active || motor_watchdog_tripped) ? "2" : "0";
+      watchdog_was_active = false;
+      motor_watchdog_tripped = false;
+      last_serial_ms = millis();
 
-      String s_steer = command.substring(2, 5);
-      String s_accel = command.substring(5, 8);
+      String req_direction = command.substring(1, 2);
+      int req_com_st = command.substring(2, 5).toInt();
+      int req_com_ac = command.substring(5, 8).toInt();
 
-      int new_st = s_steer.toInt();
-      int new_ac = s_accel.toInt();
-
-      // Range check — reject obviously wrong values without clobbering state
-      bool st_ok = (new_st >= PM_ST_N - PM_ST_LIMR) && (new_st <= PM_ST_N + PM_ST_LIML);
-      bool ac_ok = (new_ac >= PM_AC_N - PM_AC_LIMD) && (new_ac <= PM_AC_N + PM_AC_LIMU);
-
-      if (st_ok && ac_ok) {
-        com_st = new_st;
-        com_ac = new_ac;
-      } else {
-        // Out of range — hold previous targets, don't reset to neutral.
-        // (motor_control.ino reset BOTH to neutral here, which caused
-        //  unnecessary steering jumps when only one axis was marginally
-        //  out of range.)
-        cmd_status = '1';
+      // Decoupled envelope check. Only the offending axis snaps to neutral —
+      // a bad steer value must NOT release the pedal, and vice versa.
+      if (req_com_st < PM_ST_N - PM_ST_LIMR || req_com_st > PM_ST_N + PM_ST_LIML) {
+        req_com_st = PM_ST_N;
+        envelope_violation = true;
       }
+      if (req_com_ac < PM_AC_N - PM_AC_LIMD || req_com_ac > PM_AC_N + PM_AC_LIMU) {
+        req_com_ac = PM_AC_N;
+        envelope_violation = true;
+      }
+
+      // Direction change: kick off the non-blocking interlock. We do NOT
+      // flip the relay here; that happens in the interlock block below,
+      // only after the pedal actually reaches neutral.
+      if (req_direction != direction_mode && !direction_pending) {
+        direction_pending = true;
+        pending_direction = req_direction;
+        dir_change_start_ms = millis();
+      }
+
+      com_st = req_com_st;
+      com_ac = req_com_ac;
     }
 
-    // ── 2. Send diagnostic response ──
-    int pm_st_now = analogRead(0);
-    int pm_ac_now = analogRead(1);
-    // Format: <status><dir><steer><accel>,pm_st=<N>,pm_ac=<N>
-    Serial.print(cmd_status);
-    Serial.print(direction);
-    Serial.print(com_st);
-    Serial.print(com_ac);
-    Serial.print(",pm_st=");
-    Serial.print(pm_st_now);
-    Serial.print(",pm_ac=");
-    Serial.println(pm_ac_now);
+    // Reply: status + echo + comma-separated diagnostic tail.
+    // hakuroukun_communication_node.py only inspects response[0] for the
+    // status char, but the tail is useful when tailing serial by hand.
+    String d = (command.length() == 10) ? command.substring(1, 2) : String("0");
+    String s = (command.length() == 10) ? command.substring(2, 5) : String("000");
+    String a = (command.length() == 10) ? command.substring(5, 8) : String("000");
+    Serial.print(control_status);
+    Serial.print(d);
+    Serial.print(s);
+    Serial.print(a);
+    Serial.print(",pm_st="); Serial.print(pm_st);
+    Serial.print(",pm_ac="); Serial.print(pm_ac);
+    Serial.print(",gear="); Serial.print(direction_mode);
+    Serial.print(",pend="); Serial.println(direction_pending ? "1" : "0");
     Serial.flush();
   }
 
-  // ── 3. Relay switching (forward / reverse) ──
-  if (direction == "1") {
-    switch_backward();
-  } else {
-    switch_forward();
+  // 2. Direction-change interlock (non-blocking). While pending, we force
+  //    the pedal to neutral regardless of what was just parsed, and poll
+  //    the accel pot until it's within RELAY_SAFE_MARGIN of neutral.
+  if (direction_pending) {
+    com_ac = PM_AC_N;
+    pm_ac = analogRead(POT_AC_PIN);
+    if (abs(pm_ac - PM_AC_N) <= RELAY_SAFE_MARGIN) {
+      if (pending_direction == "1") {
+        digitalWrite(RELAY_ALARM, HIGH);
+        digitalWrite(RELAY_MOTOR, HIGH);
+      } else {
+        digitalWrite(RELAY_ALARM, LOW);
+        digitalWrite(RELAY_MOTOR, LOW);
+      }
+      direction_mode = pending_direction;
+      direction_pending = false;
+    } else if (millis() - dir_change_start_ms > DIR_CHANGE_TIMEOUT_MS) {
+      // Pedal never released — abandon the direction change, keep old gear
+      // latched. Loop continues normally.
+      direction_pending = false;
+    }
   }
 
-  // ── 4. Drive motors ──
-  motor_status = '0';
+  // 3. Watchdog: no valid message in WATCHDOG_MS -> release pedal.
+  //    Steering is intentionally NOT snapped to center — holding the last
+  //    valid steer target is safer than centering mid-turn. The latched
+  //    flag causes the NEXT successful message to reply with status '2',
+  //    so the ROS side can log a "heartbeat lost" warning.
+  if (millis() - last_serial_ms > WATCHDOG_MS) {
+    com_ac = PM_AC_N;
+    watchdog_was_active = true;
+  }
+
+  // 4. Drive motors toward their targets.
   motor_st(com_st);
   motor_ac(com_ac);
 
-  // ── 5. Heartbeat LED (pin 13 or LED_ST) — blink every 500ms ──
-  if (millis() - last_heartbeat >= 500) {
-    last_heartbeat = millis();
-    led_state = !led_state;
-    digitalWrite(LED_ST, led_state ? HIGH : LOW);
-  }
+  // 5. Status LEDs.
+  digitalWrite(LED_ST, envelope_violation ? HIGH : LOW);
+  digitalWrite(LED_AC, (direction_mode == "1") ? HIGH : LOW);
 }
 
-// ─── Relay Control ──────────────────────────────────────────────────────────
+// ─── Steering Motor Closed Loop ─────────────────────────────────────────────
+// Drives the steering actuator until the pot reading (A0) matches PM_st_REF.
+// The busy-wait is intentional — it comes from Tai's motor_control.ino and
+// has proven stable at 10 Hz command rate. Typical convergence < 100 ms.
 
-void switch_backward() {
-  if (direction_mode == "1") return;   // Already in reverse
-  digitalWrite(RELAY_ALARM, HIGH);
-  digitalWrite(RELAY_MOTOR, HIGH);
-  direction_mode = "1";
-}
-
-void switch_forward() {
-  if (direction_mode == "0") return;   // Already in forward
-  digitalWrite(RELAY_ALARM, LOW);
-  digitalWrite(RELAY_MOTOR, LOW);
-  direction_mode = "0";
-}
-
-// ─── Motor Drivers with Watchdog ────────────────────────────────────────────
-//
-// These drive the potentiometer to a target reading using a closed-loop
-// while-loop. The MOTOR_TIMEOUT_MS watchdog prevents hangs if:
-//   - the pot cable is loose (analogRead floats)
-//   - a mechanical stop is reached before the target
-//   - pot noise keeps oscillating around the target
-//
-// When the watchdog fires, motor_status is set to '2' so the Python side
-// can log a warning.
-
-void motor_st(int pm_st_ref) {
-  if (pm_st_ref != pre_st || millis() - time_st > MOTOR_REFRESH_MS) {
-    int pm_st = analogRead(0);
-    unsigned long start = millis();
-
-    if (pm_st > pm_st_ref) {
-      while (pm_st > pm_st_ref) {
-        if (millis() - start > MOTOR_TIMEOUT_MS) {
-          motor_status = '2';
+void motor_st(int PM_st_REF) {
+  if (PM_st_REF != pre_st || millis() - time_st > REFRESH_MS) {
+    pm_st = analogRead(POT_ST_PIN);
+    unsigned long t_start = millis();
+    if (pm_st > PM_st_REF) {
+      while (pm_st > PM_st_REF) {
+        if (millis() - t_start > MOTOR_TIMEOUT_MS) {
+          motor_watchdog_tripped = true;
           break;
         }
         digitalWrite(MD_ST_DIR, LOW);
         analogWrite(MD_ST_PWM, SPEED_ST);
-        pm_st = analogRead(0);
+        pm_st = analogRead(POT_ST_PIN);
       }
-    } else if (pm_st < pm_st_ref) {
-      while (pm_st < pm_st_ref) {
-        if (millis() - start > MOTOR_TIMEOUT_MS) {
-          motor_status = '2';
+    } else if (pm_st < PM_st_REF) {
+      while (pm_st < PM_st_REF) {
+        if (millis() - t_start > MOTOR_TIMEOUT_MS) {
+          motor_watchdog_tripped = true;
           break;
         }
         digitalWrite(MD_ST_DIR, HIGH);
         analogWrite(MD_ST_PWM, SPEED_ST);
-        pm_st = analogRead(0);
+        pm_st = analogRead(POT_ST_PIN);
       }
     }
-
     analogWrite(MD_ST_PWM, 0);
     digitalWrite(MD_ST_DIR, LOW);
     time_st = millis();
   }
-  pre_st = pm_st_ref;
+  pre_st = PM_st_REF;
 }
 
-void motor_ac(int pm_ac_ref) {
-  if (pm_ac_ref != pre_ac || millis() - time_ac > MOTOR_REFRESH_MS) {
-    int pm_ac = analogRead(1);
-    unsigned long start = millis();
+// ─── Accel Motor Closed Loop ────────────────────────────────────────────────
+// Same structure as motor_st. Note the direction convention: pm_ac INCREASES
+// as the pedal is pressed (DIR LOW), and DECREASES as it releases (DIR HIGH).
 
-    if (pm_ac < pm_ac_ref) {
-      while (pm_ac < pm_ac_ref) {
-        if (millis() - start > MOTOR_TIMEOUT_MS) {
-          motor_status = '2';
+void motor_ac(int PM_ac_REF) {
+  if (PM_ac_REF != pre_ac || millis() - time_ac > REFRESH_MS) {
+    pm_ac = analogRead(POT_AC_PIN);
+    unsigned long t_start = millis();
+    if (pm_ac < PM_ac_REF) {
+      while (pm_ac < PM_ac_REF) {
+        if (millis() - t_start > MOTOR_TIMEOUT_MS) {
+          motor_watchdog_tripped = true;
           break;
         }
         digitalWrite(MD_AC_DIR, LOW);
         analogWrite(MD_AC_PWM, SPEED_AC);
-        pm_ac = analogRead(1);
+        pm_ac = analogRead(POT_AC_PIN);
       }
-    } else if (pm_ac > pm_ac_ref) {
-      while (pm_ac > pm_ac_ref) {
-        if (millis() - start > MOTOR_TIMEOUT_MS) {
-          motor_status = '2';
+    } else if (pm_ac > PM_ac_REF) {
+      while (pm_ac > PM_ac_REF) {
+        if (millis() - t_start > MOTOR_TIMEOUT_MS) {
+          motor_watchdog_tripped = true;
           break;
         }
         digitalWrite(MD_AC_DIR, HIGH);
         analogWrite(MD_AC_PWM, SPEED_AC);
-        pm_ac = analogRead(1);
+        pm_ac = analogRead(POT_AC_PIN);
       }
     }
-
     analogWrite(MD_AC_PWM, 0);
     digitalWrite(MD_AC_DIR, LOW);
     time_ac = millis();
   }
-  pre_ac = pm_ac_ref;
+  pre_ac = PM_ac_REF;
 }
