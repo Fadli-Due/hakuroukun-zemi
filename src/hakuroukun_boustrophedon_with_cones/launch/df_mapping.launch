@@ -1,91 +1,28 @@
 <launch>
-    <!-- D-F area SLAM mapping launch (manual teleop drive).
-
-         Purpose: build a fresh occupancy-grid map of the real D-F area with
-         Gmapping, to replace the reused/stale conemap_planning.yaml.
-
-         Differs from offline_path_planning_real.launch:
-           - No map_server there is no map yet, we're building one.
-           - No map_odom_calibrator.py slam_gmapping publishes map->odom
-             itself as it scan-matches; running both would fight over the
-             same transform.
-           - odom -> base_link is still driven by odom_tf_broadcaster.py,
-             identical to straight_line_test.launch and
-             offline_path_planning_real.launch, reading
-             /hakuroukun_pose/rear_wheel_odometry.
-           - No planner / replanner / path follower. Driving is manual via
-             keyboard_teleop.py + keyboardmode.ino (flash this BEFORE
-             running NOT bcd_automode.ino).
-
-         Prerequisites:
-           - bringup_hakuroukun_robot.launch already running in another
-             terminal (provides robot_description, the LiDAR stack,
-             /scan_multi, and /hakuroukun_pose/rear_wheel_odometry).
-           - Robot held completely stationary until "Gyro Z bias
-             calibrated" appears in the bringup log.
-           - Rosbag recording started BEFORE any motion, in its own
-             terminal, per the standing rule. -->
+    <!-- D-F sim mapping. Uses Gazebo's /ground_truth/odometry directly,
+         bypassing the simulated-GPS pipeline (same approach as
+         offline_path_planning_conemap.launch). -->
 
     <arg name="open_rviz" default="true"/>
 
-    <!-- odom -> base_link (live, from hakuroukun_posenode) -->
     <node pkg="hakuroukun_boustrophedon_with_cones"
           type="odom_tf_broadcaster.py"
           name="odom_tf_broadcaster"
           output="screen">
         <param name="odom_frame" value="odom"/>
         <param name="base_frame" value="base_link"/>
-        <param name="odom_topic" value="/hakuroukun_pose/rear_wheel_odometry"/>
+        <param name="odom_topic" value="/ground_truth/odometry"/>
     </node>
 
-    <!-- Gmapping SLAM. Publishes map -> odom itself as it scan-matches,
-         plus the /map OccupancyGrid topic used by map_saver afterwards. -->
-    <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen">
-        <param name="base_frame" value="base_link"/>
-        <param name="odom_frame" value="odom"/>
-        <param name="map_frame"  value="map"/>
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/gmapping_params.yaml"
+              command="load" />
+
+    <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen" required="true">
         <remap from="scan" to="/scan_multi"/>
-
-        <!-- Update thresholds + particle count matching the configuration
-             validated in the original D-F run (Thesis Final.pdf, Listing 3.1) -->
-        <param name="particles"     value="50"/>
-        <param name="minimumScore"  value="10"/>
-        <param name="linearUpdate"  value="0.5"/>
-        <param name="angularUpdate" value="1.0"/>
-
-        <!-- Map bounds sized for the ~400 m^2 D-F area plus driving margin
-             (120m x 120m). Gmapping auto-expands past this if needed, but
-             starting large avoids a resize mid-drive. -->
-        <param name="xmin"  value="-60.0"/>
-        <param name="xmax"  value="60.0"/>
-        <param name="ymin"  value="-60.0"/>
-        <param name="ymax"  value="60.0"/>
-        <param name="delta" value="0.05"/>
-
-        <!-- Scan-matching tuning. maxUrange kept below the LiDAR's 25m max
-             range/spec to avoid smearing far/noisy returns into the map. -->
-        <param name="maxUrange"  value="16.0"/>
-        <param name="maxRange"   value="25.0"/>
-        <param name="sigma"      value="0.05"/>
-        <param name="kernelSize" value="1"/>
-        <param name="lstep"      value="0.05"/>
-        <param name="astep"      value="0.05"/>
-        <param name="iterations" value="5"/>
-        <param name="lsigma"     value="0.075"/>
-        <param name="ogain"      value="3.0"/>
-        <param name="lskip"      value="0"/>
-
-        <!-- Odometry noise model, left at gmapping defaults since our "odometry" here is GPS/IMU-derived rather than wheel encoders.
-             Revisit if the live map shows systematic warping/drift. -->
-        <param name="srr" value="0.1"/>
-        <param name="srt" value="0.2"/>
-        <param name="str" value="0.1"/>
-        <param name="stt" value="0.2"/>
     </node>
 
-    <!-- RViz: watch the map build live -->
     <group if="$(arg open_rviz)">
-        <node pkg="rviz" type="rviz" name="rviz" required="true"
-              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/df_mapping.rviz"/>
+        <node pkg="rviz" type="rviz" name="rviz_mapping" required="false"
+              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/mapping.rviz"/>
     </group>
 </launch>
