@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <launch>
-    <arg name="port" default="/dev/ttyACM0" />
+    <arg name="port" default="/dev/arduino" />
 
     <arg name="baud_rate" default="115200" />
 
