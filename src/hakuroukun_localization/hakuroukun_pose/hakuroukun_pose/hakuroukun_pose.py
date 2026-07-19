@@ -196,9 +196,7 @@ class HakuroukunPose:
     def _imu_callback(self, data: Imu):
             raw_z = data.angular_velocity.z
 
-            # Keep gyro bias calibration as a stationary-wait safety period,
-            # even though we no longer integrate gyro for yaw. The wait gives
-            # GPS time to stabilize and prevents motion during startup.
+            # Gyro bias calibration — capture bias while robot is stationary.
             if not self._bias_calibrated:
                 self._bias_samples.append(raw_z)
                 if len(self._bias_samples) % 500 == 0:
@@ -210,18 +208,43 @@ class HakuroukunPose:
                     self._bias_calibrated = True
                     self._last_imu_time = rospy.get_time()
                     rospy.loginfo(f"Gyro Z bias calibrated: {self._gyro_bias_z:.4f} deg/s")
+
+                    # Seed yaw ONCE from IMU absolute quaternion at end of
+                    # bias calibration. Robot is stationary and magnetometer-
+                    # clean at this moment (no motor commands yet), so the
+                    # IMU's absolute yaw is trustworthy as a one-time reference.
+                    # Runtime integration below diverges from this seed only
+                    # by the (bias-corrected) angular velocity we measure.
+                    q = [data.orientation.x, data.orientation.y,
+                        data.orientation.z, data.orientation.w]
+                    _, _, imu_yaw = tf.euler_from_quaternion(q)
+                    self.yaw = math.atan2(
+                        math.sin(imu_yaw - self._imu_offset),
+                        math.cos(imu_yaw - self._imu_offset))
+                    rospy.loginfo(
+                        f"[hakuroukun_pose] yaw seeded from IMU quaternion: "
+                        f"{math.degrees(self.yaw):.2f} deg")
                 return
 
-            # Extract absolute yaw from IMU quaternion, then apply calibrated
-            # offset to align with the GPS local frame. Replaces gyro integration
-            # (which produced a yaw that had no relation to the local frame,
-            # causing 90-deg decoupling between heading and position motion).
-            q = [data.orientation.x, data.orientation.y,
-                data.orientation.z, data.orientation.w]
-            _, _, imu_yaw = tf.euler_from_quaternion(q)
-            yaw_unwrapped = imu_yaw - self._imu_offset
+            # Runtime yaw integration from bias-corrected gyro.
+            # Trust: gyro (short-term stable after bias removal, no magnetic
+            #        interference susceptibility).
+            # Distrust: IMU's absolute quaternion (drifts under thermal and
+            #          magnetic conditions we can't control in the field).
+            now = rospy.get_time()
+            dt = now - self._last_imu_time
+            self._last_imu_time = now
+            if dt <= 0.0 or dt > 0.5:
+                # Skip integration on bad dt (first sample, or big gap).
+                return
+
+            # raw_z and _gyro_bias_z are both in deg/s (per the TSND151 driver
+            # convention we verified against /imu on 2026-07-19: bias -1.33
+            # matched the stationary drift observed at ~1.5 deg/s).
+            corrected_rate_deg_s = raw_z - self._gyro_bias_z
+            self.yaw += math.radians(corrected_rate_deg_s) * dt
             # Normalize to [-pi, pi]
-            self.yaw = math.atan2(math.sin(yaw_unwrapped), math.cos(yaw_unwrapped))
+            self.yaw = math.atan2(math.sin(self.yaw), math.cos(self.yaw))
 
             # Reconstruct flat (yaw-only) output quaternion
             self.quaternion_x = 0.0
