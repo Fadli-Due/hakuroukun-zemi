@@ -2,11 +2,20 @@
     <!-- Variant of offline_path_planning_conemap.launch for the D-F
          Gazebo sim world (df_area.world + df_area_planning.yaml).
          Differences vs. the conemap version:
-           - default map_file points at df_area_planning.yaml -->
+           - default map_file points at df_area_planning.yaml
+           - auto-publishes an initial AMCL pose 2s after launch, so you
+             don't need to manually click "2D Pose Estimate" in RViz every
+             time you run this. Remove the publish_initial_pose node below
+             (or set auto_initial_pose:=false) if you'd rather click manually,
+             e.g. when testing a different robot spawn point. -->
 
-    <arg name="open_rviz"       default="true"/>
-    <arg name="use_static_map"  default="true"/>
-    <arg name="map_file"        default="$(find hakuroukun_boustrophedon_with_cones)/maps/df_area_planning.yaml"/>
+    <arg name="open_rviz"          default="true"/>
+    <arg name="use_static_map"     default="true"/>
+    <arg name="map_file"           default="$(find hakuroukun_boustrophedon_with_cones)/maps/df_area_planning.yaml"/>
+    <arg name="auto_initial_pose"  default="true"/>
+    <arg name="init_x"             default="0.0"/>
+    <arg name="init_y"             default="0.0"/>
+    <arg name="init_yaw"           default="0.0"/>
 
     <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/boustrophedon_config.yaml" command="load" />
     <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/path_follower_config.yaml" command="load" />
@@ -19,13 +28,27 @@
     <node pkg="amcl" type="amcl" name="amcl" output="screen" required="true">
         <rosparam command="load"
                   file="$(find hakuroukun_boustrophedon_with_cones)/config/amcl_params.yaml"/>
-        <param name="initial_pose_x" value="0.0"/>
-        <param name="initial_pose_y" value="0.0"/>
-        <param name="initial_pose_a" value="0.0"/>
+        <param name="initial_pose_x" value="$(arg init_x)"/>
+        <param name="initial_pose_y" value="$(arg init_y)"/>
+        <param name="initial_pose_a" value="$(arg init_yaw)"/>
         <param name="initial_cov_xx" value="0.25"/>
         <param name="initial_cov_yy" value="0.25"/>
         <param name="initial_cov_aa" value="0.07"/>
         <remap from="scan" to="/scan_multi"/>
+    </node>
+
+    <!-- Auto-publishes /map_odom_calibrator/initialized (True) ~2s after
+         launch. This is the exact gate path_follower.py / offline_coverage_planner.py
+         wait on before starting; on the real robot it's published by
+         map_odom_calibrator.py after you click "2D Pose Estimate" in RViz.
+         Since this sim launch uses AMCL instead of map_odom_calibrator.py,
+         nothing would ever publish it otherwise. -->
+    <node if="$(arg auto_initial_pose)"
+          pkg="hakuroukun_boustrophedon_with_cones"
+          type="publish_initial_pose.py"
+          name="publish_map_odom_calibrated"
+          output="screen">
+        <param name="delay" value="2.0"/>
     </node>
 
     <node pkg="hakuroukun_boustrophedon_with_cones"
