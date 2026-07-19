@@ -5,6 +5,7 @@
 
     <arg name="open_rviz" default="true"/>
 
+    <!-- Broadcast odom -> base_link using Gazebo ground truth -->
     <node pkg="hakuroukun_boustrophedon_with_cones"
           type="odom_tf_broadcaster.py"
           name="odom_tf_broadcaster"
@@ -13,6 +14,10 @@
         <param name="base_frame" value="base_link"/>
         <param name="odom_topic" value="/ground_truth/odometry"/>
     </node>
+
+    <!-- Static TF publisher to connect the robot body to the merged laser scanner -->
+    <node pkg="tf2_ros" type="static_transform_publisher" name="base_link_to_laser_link" 
+          args="0.0 0.0 0.0 0.0 0.0 0.0 base_link laser_link" />
 
     <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/gmapping_params.yaml"
               command="load" />
