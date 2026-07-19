@@ -35,16 +35,6 @@ class HakuroukunPose:
 
     def _register_parameters(self):
         self.publish_rate = rospy.get_param("~publish_rate", 0.1) 
-        # Initial yaw in odom frame. The actual initial heading in the map
-        # frame is set by the 2D Pose Estimate click, which
-        # map_odom_calibrator.py converts into the map->odom yaw offset.
-        # path_follower.py reads pose in the map frame, so this value is
-        # compensated for by the calibrator regardless of what it starts at.
-        # Kept at 0.0 for a clean odom origin.
-        #
-        # (Previously hardcoded to math.pi on 2026-07-05 as a workaround
-        # for the "robot facing West at D-F" case. Replaced by the init
-        # handshake on 2026-07-06 — the calibrator now owns initial heading.)
         self.yaw = 0.0
         # Safe defaults until first GPS/IMU message arrives
         self.x_rear = 0.0
@@ -54,6 +44,7 @@ class HakuroukunPose:
         self.quaternion_z = 0.0
         self.quaternion_w = 1.0
         self._last_imu_time = 0.0
+        self._imu_offset = 0.0   # populated by _get_initial_orientation
         # Gyro bias calibration
         self._bias_samples = []
         self._gyro_bias_z = 0.0
@@ -86,16 +77,9 @@ class HakuroukunPose:
                 calib = yaml.safe_load(f)
             angle_deg = calib["rotation_angle_deg"]
             self.rotation_angle_deg = angle_deg
-            # Offset that aligns IMU yaw zero-reference with GPS local frame +X.
-            # Without this, self.yaw and (x_gps, y_gps) live in different frames
-            # and the rear-axle projection (and downstream steering) go wrong
-            # whenever the robot boots facing anything other than the local +X
-            # direction. Estimated 2026-07-14 from empirical rotation test.
-            self.imu_yaw_offset_deg = calib.get("imu_yaw_offset_deg", 0.0)
             rospy.loginfo(
                 f"[hakuroukun_pose] Loaded GPS rotation angle "
-                f"{angle_deg:.2f} deg, IMU yaw offset "
-                f"{self.imu_yaw_offset_deg:.2f} deg from {calib_path} "
+                f"{angle_deg:.2f} deg"
                 f"(calibrated {calib.get('calibrated_at', 'unknown')}, "
                 f"{calib.get('segments_used', '?')} segments, "
                 f"agreement={calib.get('segment_agreement_deg', '?')} deg)")
@@ -146,8 +130,57 @@ class HakuroukunPose:
         self.initial_lon = first_gps_mess.longitude
 
     def _get_initial_orientation(self):
-        rospy.wait_for_message('/imu', Imu, timeout=10)
-        rospy.loginfo("IMU Data Received")
+        """Capture IMU yaw offset live at startup.
+        
+        Waits until 200 consecutive quaternion-yaw differences are all
+        below 0.001 rad (robot fully stationary), then snapshots the raw
+        yaw as self._imu_offset. Replaces the YAML-loaded offset, which
+        assumed a fixed parking direction between sessions.
+        
+        Ported from Tai's method with the abs() bug fixed — his version
+        used `val < epsilon` which was trivially satisfied by any
+        negative difference, so convergence was too eager.
+        """
+        import time
+        start_time = time.time()
+        imu_yaws = []
+        diffs = []
+        threshold = 200
+        epsilon = 0.001  # rad, ~0.057 deg
+
+        while not rospy.is_shutdown() and (time.time() - start_time < 30):
+            try:
+                data = rospy.wait_for_message("/imu", Imu, timeout=3.0)
+                _, _, yaw = tf.euler_from_quaternion(
+                    [data.orientation.x, data.orientation.y,
+                    data.orientation.z, data.orientation.w])
+                imu_yaws.append(yaw)
+
+                if len(imu_yaws) > 1:
+                    d = imu_yaws[-1] - imu_yaws[-2]
+                    # Handle wrap-around at ±pi
+                    d = math.atan2(math.sin(d), math.cos(d))
+                    diffs.append(abs(d))  # <-- the fix: abs() around the diff
+
+                    if len(diffs) > threshold:
+                        diffs.pop(0)
+
+                    if len(diffs) == threshold and all(v < epsilon for v in diffs):
+                        self._imu_offset = imu_yaws[-1]
+                        rospy.loginfo(
+                            f"[hakuroukun_pose] IMU offset captured live: "
+                            f"{math.degrees(self._imu_offset):.2f} deg")
+                        return
+
+                rospy.loginfo_throttle(2.0, "Calibrating IMU offset ...")
+            except rospy.ROSException:
+                rospy.logwarn("No IMU message received within timeout.")
+
+        # Timeout — set offset to 0 and log a warning
+        self._imu_offset = 0.0
+        rospy.logwarn(
+            "[hakuroukun_pose] IMU offset calibration timed out after 30s. "
+            "Using offset = 0. Heading may be misaligned with map frame.")
 
     def _gps_callback(self, data: NavSatFix):
         if not self._bias_calibrated:
@@ -186,7 +219,7 @@ class HakuroukunPose:
             q = [data.orientation.x, data.orientation.y,
                 data.orientation.z, data.orientation.w]
             _, _, imu_yaw = tf.euler_from_quaternion(q)
-            yaw_unwrapped = imu_yaw + math.radians(self.imu_yaw_offset_deg)
+            yaw_unwrapped = imu_yaw - self._imu_offset
             # Normalize to [-pi, pi]
             self.yaw = math.atan2(math.sin(yaw_unwrapped), math.cos(yaw_unwrapped))
 
