@@ -71,18 +71,53 @@ except ImportError:
 # Extraction
 # ============================================================================
 
-def extract_bag(bag_path: Path) -> Dict[str, Any]:
-    """Read a bag, return dict of DataFrames + path/map metadata."""
+NEEDED_TOPICS = {
+    '/fix', '/cmd_controller', '/hakuroukun/gear_state',
+    '/tf', '/tf_static',
+    '/planned_path', '/desired_path', '/map',
+}
+
+
+def extract_bag(bag_path: Path, odom_topic: str = '/hakuroukun_pose/rear_wheel_odometry') -> Dict[str, Any]:
+    """Read a bag, return dict of DataFrames + path/map metadata.
+
+    odom_topic: which nav_msgs/Odometry topic to treat as the robot's pose feed.
+      Real-robot bags: '/hakuroukun_pose/rear_wheel_odometry' (default).
+      Sim bags using ground-truth odometry: '/ground_truth/odometry'.
+    Bags without /fix or /hakuroukun/gear_state (e.g. sim runs) are handled
+    gracefully — those sections of the report are simply omitted (n_samples: 0).
+
+    Only connections in NEEDED_TOPICS (+ odom_topic) are iterated. This matters
+    a lot for bags recorded with `rosbag record -a` in Gazebo, which also
+    capture huge high-rate topics (gazebo_msgs/LinkStates, ModelStates, camera
+    images, diagnostics) that bloat the bag to 10-20x the size actually needed
+    and are never used here — deserializing those is what makes an unfiltered
+    read of a 17 GB / 4.6M-message bag take an extremely long time.
+    """
     data = {
         'fix': [], 'odom': [], 'cmd': [], 'gear': [],
         'tf_map_odom': [], 'tf_odom_base': [],
         'planned_path': None, 'desired_path': None, 'map': None,
         't_start': None, 't_end': None,
     }
+    wanted = NEEDED_TOPICS | {odom_topic}
     with AnyReader([bag_path]) as reader:
         data['t_start'] = reader.start_time / 1e9
         data['t_end'] = reader.end_time / 1e9
-        for conn, ts, raw in reader.messages():
+
+        conns = [c for c in reader.connections if c.topic in wanted]
+        found_topics = {c.topic for c in conns}
+        missing = wanted - found_topics
+        if missing:
+            sys.stderr.write(f"  note: topics not present in bag (OK if expected): {sorted(missing)}\n")
+        print(f"  filtering to {len(conns)} connections on {sorted(found_topics)} "
+              f"(skipping everything else in the bag)", flush=True)
+
+        n_msg = 0
+        for conn, ts, raw in reader.messages(connections=conns):
+            n_msg += 1
+            if n_msg % 50000 == 0:
+                print(f"  ... {n_msg} messages processed", flush=True)
             t = ts / 1e9
             topic = conn.topic
             msg = reader.deserialize(raw, conn.msgtype)
@@ -94,7 +129,7 @@ def extract_bag(bag_path: Path) -> Dict[str, Any]:
                     'cov_yy': msg.position_covariance[4],
                     'cov_zz': msg.position_covariance[8],
                 })
-            elif topic == '/hakuroukun_pose/rear_wheel_odometry':
+            elif topic == odom_topic:
                 p = msg.pose.pose.position
                 q = msg.pose.pose.orientation
                 data['odom'].append({
@@ -345,10 +380,11 @@ def gps_stats(fix_df: pd.DataFrame) -> Dict[str, Any]:
 def evaluate(bag_path: Path,
              cleaning_width: float = 1.0,
              stall_threshold: float = 0.02,
-             stall_min_duration: float = 3.0) -> Dict[str, Any]:
+             stall_min_duration: float = 3.0,
+             odom_topic: str = '/hakuroukun_pose/rear_wheel_odometry') -> Dict[str, Any]:
     """Return the full metrics dict for one bag (no plotting, no IO to disk)."""
     print(f"  reading {bag_path.name} ...", flush=True)
-    bag = extract_bag(bag_path)
+    bag = extract_bag(bag_path, odom_topic=odom_topic)
 
     traj = build_map_trajectory(bag)
     speed = compute_speed(traj) if len(traj) > 1 else np.array([])
@@ -536,7 +572,7 @@ def make_plot(m: Dict[str, Any], out_path: Path) -> None:
     ax.imshow(disp, origin='lower', extent=extent, cmap='gray', vmin=0, vmax=1, alpha=0.7)
     ax.plot(px, py, 'b-', lw=1.0, alpha=0.6, label=f'planned ({len(plan_pts)} pts)')
     tt = (traj['t'].values - traj['t'].iloc[0]) / max(traj['t'].iloc[-1] - traj['t'].iloc[0], 1e-9)
-    ax.scatter(traj['x'], traj['y'], c=tt, cmap='plasma', s=1.2, alpha=0.7)
+    ax.scatter(traj['x'].values, traj['y'].values, c=tt, cmap='plasma', s=1.2, alpha=0.7)
     ax.plot(traj['x'].iloc[0], traj['y'].iloc[0], 'go', ms=10, mec='k', label='start')
     ax.plot(traj['x'].iloc[-1], traj['y'].iloc[-1], 'ks', ms=10, label='end')
     for st in stalls:
@@ -554,7 +590,7 @@ def make_plot(m: Dict[str, Any], out_path: Path) -> None:
     cleaned_mask = cov['cleaned_mask'] & cov['valid_mask']
     d3[cleaned_mask] = [0.2, 0.75, 0.35]
     ax.imshow(d3, origin='lower', extent=extent)
-    ax.plot(traj['x'], traj['y'], 'r-', lw=0.5, alpha=0.5)
+    ax.plot(traj['x'].values, traj['y'].values, 'r-', lw=0.5, alpha=0.5)
     ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax); ax.set_aspect('equal')
     ax.set_title(f"Coverage = {cov['coverage_pct']:.2f}%   "
                  f"({cov['cleaned_area_m2']:.1f}/{cov['total_valid_area_m2']:.1f} m²)")
@@ -615,8 +651,8 @@ def make_plot(m: Dict[str, Any], out_path: Path) -> None:
     # --- GPS covariance ---
     ax = fig.add_subplot(gs[3, :])
     if len(bag['fix']):
-        ax.semilogy(bag['fix']['t'] - t0, bag['fix']['cov_xx'], 'g-', lw=0.7, label='cov_xx')
-        ax.semilogy(bag['fix']['t'] - t0, bag['fix']['cov_yy'], 'b-', lw=0.7, alpha=0.6, label='cov_yy')
+        ax.semilogy(bag['fix']['t'].values - t0, bag['fix']['cov_xx'].values, 'g-', lw=0.7, label='cov_xx')
+        ax.semilogy(bag['fix']['t'].values - t0, bag['fix']['cov_yy'].values, 'b-', lw=0.7, alpha=0.6, label='cov_yy')
         ax.axhline(1e-3, color='orange', lw=0.5, ls='--', alpha=0.5, label='1e-3 (great RTK)')
         ax.axhline(1e-2, color='red', lw=0.5, ls='--', alpha=0.5, label='1e-2 (RTK float)')
         gp = m['gps']
@@ -733,6 +769,12 @@ def main() -> int:
                     help='minimum stall duration in seconds to count (default 3.0)')
     ap.add_argument('--no-plots', action='store_true',
                     help='skip PNG plot generation (faster for large batches)')
+    ap.add_argument('--odom-topic', default='/hakuroukun_pose/rear_wheel_odometry',
+                    help='nav_msgs/Odometry topic to use as the robot pose feed. '
+                         'Default is the real-robot fused pose. For sim bags using '
+                         'ground-truth odometry (e.g. offline_path_planning_conemap_df.launch '
+                         'with odom_tf_broadcaster reading /ground_truth/odometry), pass '
+                         '--odom-topic /ground_truth/odometry')
 
     args = ap.parse_args()
 
@@ -757,7 +799,8 @@ def main() -> int:
             m = evaluate(bp,
                          cleaning_width=args.cleaning_width,
                          stall_threshold=args.stall_threshold,
-                         stall_min_duration=args.stall_min_duration)
+                         stall_min_duration=args.stall_min_duration,
+                         odom_topic=args.odom_topic)
             write_outputs(m, args.output_dir, make_plots=not args.no_plots)
             rows.append(to_row(m))
             print(format_summary(m))
