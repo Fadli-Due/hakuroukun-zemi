@@ -74,11 +74,11 @@
                                        // risks damaging the pedal-actuator
                                        // frame per 2026-07-07 manual testing.
 
-#define PM_ST_N                  606   // Steering neutral pot value
-#define PM_ST_LIMR               92   // Right envelope: PM_ST_N - LIMR = 200
-#define PM_ST_LIML               301   // Left  envelope: PM_ST_N + LIML = 690
-#define PM_AC_N                  237   // Accel neutral (pedal fully released)
-#define PM_AC_LIMU               524   // Press   envelope: PM_AC_N + LIMU = 735
+#define PM_ST_N                  567   // Steering neutral pot value
+#define PM_ST_LIMR               280   // Right envelope: PM_ST_N - LIMR = 200
+#define PM_ST_LIML               123   // Left  envelope: PM_ST_N + LIML = 690
+#define PM_AC_N                  193   // Accel neutral (pedal fully released)
+#define PM_AC_LIMU               574   // Press   envelope: PM_AC_N + LIMU = 735
 #define PM_AC_LIMD                20   // Release envelope: PM_AC_N - LIMD = 215
 
 #define REFRESH_MS              1000   // Motor closed-loop keep-alive interval
