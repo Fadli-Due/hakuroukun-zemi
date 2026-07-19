@@ -20,7 +20,7 @@
 
     <!-- Arguments -->
     <arg name="open_rviz"   default="true"/>
-    <arg name="map_file"    default="$(find hakuroukun_boustrophedon_with_cones)/maps/conemap_planning.yaml"/>
+    <arg name="map_file"    default="$(find hakuroukun_boustrophedon_with_cones)/maps/df_area_planning.yaml"/>
 
     <!-- Optional initial map->odom offset. Rarely needed: usually you start
          with identity and calibrate in RViz via "2D Pose Estimate". -->
