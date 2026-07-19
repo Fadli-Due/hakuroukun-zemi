@@ -1,0 +1,65 @@
+# gmapping parameters for real D-F outdoor mapping.
+# Tuned for: outdoor field ~30x30 m, RTK-anchored fused odom (median cov ~1e-4 m²),
+# dual-LiDAR merged scan (/scan_multi), robot driven manually at ~0.2-0.3 m/s.
+#
+# Key differences from the default / sim params:
+#   - Fewer particles (30 vs default 30-100). RTK bounds absolute position drift,
+#     so we don't need a big particle cloud fighting odom uncertainty.
+#   - Lower motion-model noise (srr/srt/str/stt). Fused odom is more accurate than
+#     raw wheel odom, so we can trust it more.
+#   - Tighter linear/angular update thresholds so the map builds smoothly at low speed.
+#   - Larger map bounds (60x60 m) to cover D-F with margin.
+#   - maxUrange 20 m fits the RPLiDAR practical outdoor range; maxRange slightly larger.
+#
+# If your map ends up too coarse or too "thick" on obstacles, drop delta to 0.03.
+# If gmapping struggles to close loops, raise particles to 60-80 and/or relax
+# srr/srt/str/stt back toward defaults.
+
+# ---- sensor model ----
+maxUrange: 20.0              # max range used for scan matching (m)
+maxRange: 25.0               # sensor's actual max range for building the map (m)
+sigma: 0.05                  # sensor model std dev (m)
+kernelSize: 1                # search-space kernel radius (cells)
+lstep: 0.05                  # optimization linear step (m)
+astep: 0.05                  # optimization angular step (rad)
+iterations: 5                # scan-matcher iterations
+lsigma: 0.075                # likelihood sigma (m)
+ogain: 3.0                   # gain for smoothing likelihood
+lskip: 0                     # use every laser beam (0 = none skipped)
+
+# ---- motion model (odom noise) ----
+# Format: srr = translation induced by translation, srt = translation by rotation,
+#         str = rotation by translation, stt = rotation by rotation.
+# Reduced from gmapping defaults (0.1 each) because fused odom is cleaner than pure wheel.
+srr: 0.05
+srt: 0.05
+str: 0.05
+stt: 0.05
+
+# ---- update triggers ----
+linearUpdate: 0.5            # process a scan every 0.5 m of translation
+angularUpdate: 0.3           # ... or every 0.3 rad of rotation
+temporalUpdate: 3.0          # ... or every 3 s even if not moving
+resampleThreshold: 0.5       # Neff / N threshold for resampling
+
+# ---- particles ----
+particles: 30                # sufficient with RTK-backed odom; raise to 60 if noisy
+
+# ---- map extent (world coords, m) ----
+# Robot starts at origin; adjust if D-F sprawls asymmetrically.
+xmin: -30.0
+ymin: -30.0
+xmax:  30.0
+ymax:  30.0
+delta: 0.05                  # grid resolution (m/cell); matches 992x992 @ 0.05 you already use
+
+# ---- initial pose likelihood grid ----
+llsamplerange: 0.01
+llsamplestep: 0.01
+lasamplerange: 0.005
+lasamplestep: 0.005
+
+# ---- publishing ----
+transform_publish_period: 0.05    # 20 Hz map->odom TF
+map_update_interval: 2.0          # rebuild published /map every 2 s
+occ_thresh: 0.25                  # cell prob threshold for "occupied" in published map
