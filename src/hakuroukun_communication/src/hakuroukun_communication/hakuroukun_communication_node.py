@@ -5,7 +5,7 @@
 import serial
 import rospy
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, Int8MultiArray
 import time
 
 
@@ -37,10 +37,16 @@ class HakuroukunCommunicationNode(object):
         self.cmd_controller_subscriber = rospy.Subscriber(
             "/cmd_controller", Float64MultiArray, self._cmd_controller_callback
         )
-        # If you want to use /cmd_vel, uncomment below:
-        # self.cmd_vel_subscriber = rospy.Subscriber(
-        #     "/cmd_vel", Twist, self._cmd_vel_callback
-        # )
+
+        # Publisher for gear state feedback (2026-07-19).
+        # Data layout: [gear_actual (0=fwd, 1=rev), pend (0=idle, 1=pending)].
+        # path_follower.py uses this to gate the reverse-mode timer so
+        # the min_rev_dwell only starts counting after the gear is
+        # physically engaged (gear matches commanded, pend=0). Without
+        # this, reverse dwell burns during mechanical gear shift latency
+        # and the robot never actually moves backward.
+        self.gear_state_pub = rospy.Publisher(
+            "/hakuroukun/gear_state", Int8MultiArray, queue_size=1)
 
         # Timer for sending commands at a fixed rate
         self.timer = rospy.Timer(
@@ -60,9 +66,6 @@ class HakuroukunCommunicationNode(object):
         self.previous_steering_angle = 0.0
 
         # Hysteresis state for curve-switching (see _corrected_steering_command).
-        # committed_direction_ccw starts as None so the very first command
-        # picks a direction unconditionally (no prior commitment to compare
-        # against).
         self.committed_direction_ccw = None
         self.committed_goal_angle = 0.0
         self.STEERING_HYSTERESIS_RAD = 0.03  # tune if oscillation persists
@@ -76,7 +79,6 @@ class HakuroukunCommunicationNode(object):
         acceleration_command, steering_command = self._apply_indentification()
 
         # Format: "0" + dir(1) + steering(3) + acceleration(3) + "00" = 10 chars
-        # Then append \r\n so the Arduino can use readStringUntil('\n')
         command = f"0{self.direction}{steering_command:03d}{acceleration_command:03d}00"
         rospy.loginfo(command)
 
@@ -84,7 +86,7 @@ class HakuroukunCommunicationNode(object):
         self.connection.flush()
 
         # Read diagnostic response from Arduino
-        # bcd_automode.ino sends: "<status><dir><steer><accel>,pm_st=N,pm_ac=N\n"
+        # bcd_automode.ino sends: "<status><dir><steer><accel>,pm_st=N,pm_ac=N,gear=N,pend=N\n"
         try:
             data = self.connection.readline()
             if data:
@@ -102,15 +104,21 @@ class HakuroukunCommunicationNode(object):
                     # Firmware format: "...,gear=<0|1>,pend=<0|1>"
                     if ',gear=' in response:
                         try:
-                            gear_actual = response.split(',gear=')[1][0]
-                            pend_str = response.split(',pend=')[1][0] \
-                                if ',pend=' in response else '?'
-                            if gear_actual != str(self.direction):
+                            gear_actual = int(response.split(',gear=')[1][0])
+                            pend_int = int(response.split(',pend=')[1][0]) \
+                                if ',pend=' in response else 0
+
+                            # Publish gear state for path_follower's reverse timer.
+                            gear_msg = Int8MultiArray()
+                            gear_msg.data = [gear_actual, pend_int]
+                            self.gear_state_pub.publish(gear_msg)
+
+                            if gear_actual != self.direction:
                                 rospy.logwarn_throttle(
                                     1.0,
                                     f"[comm] GEAR MISMATCH: "
                                     f"commanded={self.direction} "
-                                    f"actual={gear_actual} pending={pend_str}")
+                                    f"actual={gear_actual} pending={pend_int}")
                         except (IndexError, ValueError):
                             pass
         except Exception as e:
@@ -125,16 +133,9 @@ class HakuroukunCommunicationNode(object):
         self.cmd_vel_flag = True
 
     def _apply_indentification(self):
-        """
-        Determines appropriate motor acceleration and steering commands.
-        Uses an asymmetric quadratic mapping for steering power correction.
-        """
         linear_velocity = 0.0
         steering_angle = 0.0
-        # Direction is only updated when a new message actually arrives.
-        # (FIX 2: do NOT reset self.direction = 0 unconditionally.)
 
-        # Check /cmd_vel
         if self.cmd_vel_flag:
             self.cmd_vel_flag = False
             if self.cmd_vel_msg.linear.x < 0:
@@ -146,10 +147,7 @@ class HakuroukunCommunicationNode(object):
             self.cumulative_steering_angle += steering_angle_delta
             steering_angle = self.cumulative_steering_angle
 
-        # Check /cmd_controller
         elif self.cmd_controller_flag:
-            # Keep applying last cmd — don't reset flag so the last command
-            # persists across timer ticks even if no new message arrives.
             if self.cmd_controller_msg.data[0] < 0:
                 self.direction = 1
             else:
@@ -159,16 +157,16 @@ class HakuroukunCommunicationNode(object):
 
         # Acceleration command
         if linear_velocity == 0:
-            acceleration_command = 237   # neutral, pedal released
+            acceleration_command = 193   # neutral, pedal released
         else:
-            raw_accel = 237 + linear_velocity * 1428
+            raw_accel = 193 + linear_velocity * 1428
             acceleration_command = max(raw_accel, 550)
-        acceleration_command = max(237, min(750, acceleration_command))
+        acceleration_command = max(193, min(767, acceleration_command))
 
-        # Steering command (with asymmetric correction)
+        # Steering command
         steering_val = self._corrected_steering_command(steering_angle)
         steering_command = round(steering_val)
-        steering_command = max(315, min(688, steering_command)) 
+        steering_command = max(287, min(690, steering_command))
 
         return int(acceleration_command), int(steering_command)
 
@@ -179,18 +177,17 @@ class HakuroukunCommunicationNode(object):
             self.committed_direction_ccw = (delta > 0)
             self.committed_goal_angle = goal_angle_rad
 
-        # Kept in sync for any other code path that still reads this attr.
         self.previous_steering_angle = goal_angle_rad
 
         if self.committed_direction_ccw:
             a_ccw = -86.29
             b_ccw = 317.31
-            c_ccw = 720
+            c_ccw = 567
             return a_ccw * (goal_angle_rad ** 2) + b_ccw * goal_angle_rad + c_ccw
         else:
             a_cw = 69.86
             b_cw = 317.31
-            c_cw = 635
+            c_cw = 567
             return a_cw * (goal_angle_rad ** 2) + b_cw * goal_angle_rad + c_cw
 
 
