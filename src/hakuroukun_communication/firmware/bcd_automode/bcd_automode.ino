@@ -85,7 +85,7 @@
 #define WATCHDOG_MS              500   // Release pedal if no msg for this long
 #define STARTUP_HOLD_MS         1000   // Hold neutral for this long at boot
 #define RELAY_SAFE_MARGIN         30   // Pedal must be within this of neutral
-#define DIR_CHANGE_TIMEOUT_MS   2000   // Max wait for pedal release before
+#define DIR_CHANGE_TIMEOUT_MS   4000   // Max wait for pedal release before
 #define MOTOR_TIMEOUT_MS         400
                                        // abandoning a direction change
 
@@ -280,10 +280,12 @@ void motor_st(int PM_st_REF) {
   if (PM_st_REF != pre_st || millis() - time_st > REFRESH_MS) {
     pm_st = analogRead(POT_ST_PIN);
     unsigned long t_start = millis();
+    bool converged = true;
     if (pm_st > PM_st_REF) {
       while (pm_st > PM_st_REF) {
         if (millis() - t_start > MOTOR_TIMEOUT_MS) {
           motor_watchdog_tripped = true;
+          converged = false;
           break;
         }
         digitalWrite(MD_ST_DIR, LOW);
@@ -294,6 +296,7 @@ void motor_st(int PM_st_REF) {
       while (pm_st < PM_st_REF) {
         if (millis() - t_start > MOTOR_TIMEOUT_MS) {
           motor_watchdog_tripped = true;
+          converged = false;
           break;
         }
         digitalWrite(MD_ST_DIR, HIGH);
@@ -304,8 +307,10 @@ void motor_st(int PM_st_REF) {
     analogWrite(MD_ST_PWM, 0);
     digitalWrite(MD_ST_DIR, LOW);
     time_st = millis();
+    if (converged) {
+      pre_st = PM_st_REF;   // only latch success
+    }
   }
-  pre_st = PM_st_REF;
 }
 
 // ─── Accel Motor Closed Loop ────────────────────────────────────────────────
@@ -316,10 +321,12 @@ void motor_ac(int PM_ac_REF) {
   if (PM_ac_REF != pre_ac || millis() - time_ac > REFRESH_MS) {
     pm_ac = analogRead(POT_AC_PIN);
     unsigned long t_start = millis();
+    bool converged = true;
     if (pm_ac < PM_ac_REF) {
       while (pm_ac < PM_ac_REF) {
         if (millis() - t_start > MOTOR_TIMEOUT_MS) {
           motor_watchdog_tripped = true;
+          converged = false;
           break;
         }
         digitalWrite(MD_AC_DIR, LOW);
@@ -330,6 +337,7 @@ void motor_ac(int PM_ac_REF) {
       while (pm_ac > PM_ac_REF) {
         if (millis() - t_start > MOTOR_TIMEOUT_MS) {
           motor_watchdog_tripped = true;
+          converged = false;
           break;
         }
         digitalWrite(MD_AC_DIR, HIGH);
@@ -340,6 +348,8 @@ void motor_ac(int PM_ac_REF) {
     analogWrite(MD_AC_PWM, 0);
     digitalWrite(MD_AC_DIR, LOW);
     time_ac = millis();
+    if (converged) {
+      pre_ac = PM_ac_REF;   // only latch success
+    }
   }
-  pre_ac = PM_ac_REF;
 }
