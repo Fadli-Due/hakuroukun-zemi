@@ -37,6 +37,8 @@ import tf2_geometry_msgs  # noqa: F401  (registers PoseStamped for tf2 transform
 
 from planning.simple_astar import astar_plan, SimpleOccupancyGrid
 
+from std_msgs.msg import Bool
+
 
 # -----------------------------------------------------------------------------
 #  Boustrophedon cell
@@ -104,6 +106,9 @@ class OfflineCoveragePlanner:
         self.map_data = None
         self.start_pose = None
         self.path_generated = False
+        
+        self.map_odom_ready = False
+        rospy.Subscriber('/map_odom_calibrator/initialized', Bool, self.map_odom_init_cb)
 
         self.tf_buf = tf2_ros.Buffer(cache_time=rospy.Duration(10.0))
         self.tf_lst = tf2_ros.TransformListener(self.tf_buf)
@@ -117,6 +122,11 @@ class OfflineCoveragePlanner:
     # ------------------------------------------------------------------ I/O
     def map_cb(self, msg):
         self.map_data = msg
+        
+    def map_odom_init_cb(self, msg):
+        if msg.data and not self.map_odom_ready:
+            rospy.loginfo("[BCD] map->odom calibrated — planner may now proceed")
+        self.map_odom_ready = bool(msg.data)
 
     def odom_cb(self, msg):
         try:
@@ -130,11 +140,17 @@ class OfflineCoveragePlanner:
             from scipy.spatial.transform import Rotation
             self.start_yaw = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_euler("zyx")[0]
         except Exception:
-            self.start_pose = (msg.pose.pose.position.x, msg.pose.pose.position.y)
-            self.start_yaw = 0.0
+            # Before map->odom calibration, this TF doesn't exist. Do NOT fall
+            # back to raw odom coords — they'd be silently mis-interpreted as
+            # map-frame. Leave start_pose as None until the transform works.
+            return
 
     def check_and_plan(self, event):
         if self.path_generated:
+            return
+        if not self.map_odom_ready:
+            rospy.loginfo_throttle(5, "[BCD] waiting for map->odom calibration "
+                                    "(click '2D Pose Estimate' in RViz)...")
             return
         if self.map_data is None:
             rospy.loginfo_throttle(5, "[BCD] waiting for /map ...")
