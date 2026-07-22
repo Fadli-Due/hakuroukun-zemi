@@ -1,0 +1,21 @@
+Bag:               sim_df_20260719_154504.bag
+Duration:          1293.8 s   (21.56 min)
+Path length:       328.47 m
+Mean speed moving: 0.272 m/s   (94.2% of run in motion)
+Planned source:    /planned_path  (2018 pts)
+
+Coverage:          60.08 %   (cleaned 266.91 / valid 444.29 m²)
+Restricted-cell hits: 0 samples (0.00% of trajectory)
+
+Trajectory error (nearest-neighbor planned -> actual):
+  Savg = 0.2495 m   Smax = 0.8340 m   RMS = 0.3168 m
+  Planned pts > 1 m off: 0 (0.0%)
+
+Stalls (< 0.02 m/s for >= 3.0 s):
+  count = 7  total = 71.1 s (5.5% of run)
+
+GPS quality (51743 fixes):
+  cov_xx min=1.00e-04  median=1.00e-04  max=1.00e-04
+  fixes with cov > 0.01 m²: 0   cov > 1 m²: 0
+  max gap between fixes: 0.04 s   gaps > 2 s: 0
+  status hist: {0: 51743}

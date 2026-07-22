@@ -1,0 +1,16 @@
+Bag:               bcd_df_sim_20260721_032848.bag
+Duration:          580.3 s   (9.67 min)
+Path length:       115.42 m
+Mean speed moving: 0.263 m/s   (87.5% of run in motion)
+Planned source:    /desired_path  (2018 pts)
+
+Coverage:          30.40 %   (cleaned 101.66 / valid 334.44 m², src=bcd_inflated)
+  (raw white-area denominator: 22.88 % over 444.29 m²)
+Restricted-cell hits: 0 samples (0.00% of trajectory)
+
+Trajectory error (nearest-neighbor planned -> actual):
+  Savg = 1.5668 m   Smax = 7.1874 m   RMS = 2.2171 m
+  Planned pts > 1 m off: 941 (46.6%)
+
+Stalls (< 0.02 m/s for >= 3.0 s):
+  count = 4  total = 59.9 s (10.3% of run)
