@@ -416,6 +416,18 @@ class LocalReplanner:
         i_now = self._closest_path_index_windowed(
             self.current_path, self.robot_xy, self.last_i_now)
         self.last_i_now = i_now
+        
+        n_persist = int(persistent_mask.sum())
+        if hasattr(self, 'obs_first') and self.obs_first is not None \
+                and np.any(self.obs_first > 0):
+            max_age = float((now - self.obs_first[self.obs_first > 0]).max())
+        else:
+            max_age = 0.0
+        rospy.loginfo_throttle(
+            2.0, f"[eval] persistent_cells={n_persist} "
+                 f"max_obs_age={max_age:.1f}s "
+                 f"threshold={self.persistence_threshold:.1f}s "
+                 f"i_now={i_now}")
 
         # 3) Find the first blocked index ahead within lookahead_check_m.
         i_block_start, i_block_end = self._find_blocked_span(
