@@ -75,6 +75,7 @@ NEEDED_TOPICS = {
     '/fix', '/cmd_controller', '/hakuroukun/gear_state',
     '/tf', '/tf_static',
     '/planned_path', '/desired_path', '/map',
+    '/bcd_valid_area_m2',
 }
 
 
@@ -98,6 +99,7 @@ def extract_bag(bag_path: Path, odom_topic: str = '/hakuroukun_pose/rear_wheel_o
         'fix': [], 'odom': [], 'cmd': [], 'gear': [],
         'tf_map_odom': [], 'tf_odom_base': [],
         'planned_path': None, 'desired_path': None, 'map': None,
+        'bcd_valid_area_m2': None,
         't_start': None, 't_end': None,
     }
     wanted = NEEDED_TOPICS | {odom_topic}
@@ -190,6 +192,8 @@ def extract_bag(bag_path: Path, odom_topic: str = '/hakuroukun_pose/rear_wheel_o
                     'origin_y': msg.info.origin.position.y,
                     'data': np.array(msg.data, dtype=np.int8),
                 }
+            elif topic == '/bcd_valid_area_m2' and data['bcd_valid_area_m2'] is None:
+                data['bcd_valid_area_m2'] = float(msg.data)
 
     for k in ['fix', 'odom', 'cmd', 'gear', 'tf_map_odom', 'tf_odom_base']:
         data[k] = pd.DataFrame(data[k])
@@ -377,11 +381,47 @@ def gps_stats(fix_df: pd.DataFrame) -> Dict[str, Any]:
 # Full evaluation of one bag
 # ============================================================================
 
+def _build_coverage_report(cov: Optional[Dict[str, Any]],
+                           bcd_valid_area_m2: Optional[float]) -> Dict[str, Any]:
+    """Build the 'coverage' sub-dict, optionally rescoring against the
+    BCD-inflated valid area (Sensei's denominator convention)."""
+    if cov is None:
+        return {
+            'coverage_pct': float('nan'),
+            'cleaned_area_m2': float('nan'),
+            'total_valid_area_m2': float('nan'),
+            'restricted_violations': 0,
+            'restricted_violations_pct': 0.0,
+        }
+    raw_pct = cov['coverage_pct']
+    raw_valid = cov['total_valid_area_m2']
+    cleaned = cov['cleaned_area_m2']
+    report = {
+        'coverage_pct': raw_pct,
+        'coverage_pct_raw': raw_pct,
+        'cleaned_area_m2': cleaned,
+        'total_valid_area_m2': raw_valid,
+        'total_valid_area_m2_raw': raw_valid,
+        'valid_area_source': 'raw_free_cells',
+        'restricted_violations': cov['restricted_violations'],
+        'restricted_violations_pct': cov['restricted_violations_pct'],
+    }
+    if bcd_valid_area_m2 is not None and bcd_valid_area_m2 > 0:
+        rescored = 100.0 * cleaned / bcd_valid_area_m2
+        report.update({
+            'coverage_pct': rescored,             # primary value now BCD-based
+            'total_valid_area_m2': bcd_valid_area_m2,
+            'valid_area_source': 'bcd_inflated',
+            'bcd_valid_area_m2': bcd_valid_area_m2,
+        })
+    return report
+
 def evaluate(bag_path: Path,
              cleaning_width: float = 1.0,
              stall_threshold: float = 0.02,
              stall_min_duration: float = 3.0,
-             odom_topic: str = '/hakuroukun_pose/rear_wheel_odometry') -> Dict[str, Any]:
+             odom_topic: str = '/hakuroukun_pose/rear_wheel_odometry',
+             bcd_valid_area_m2: Optional[float] = None) -> Dict[str, Any]:
     """Return the full metrics dict for one bag (no plotting, no IO to disk)."""
     print(f"  reading {bag_path.name} ...", flush=True)
     bag = extract_bag(bag_path, odom_topic=odom_topic)
@@ -421,7 +461,11 @@ def evaluate(bag_path: Path,
         cov = compute_coverage(traj[['x', 'y']].values, bag['map'], cleaning_width)
     else:
         cov = None
-
+    # If no CLI override, fall back to the value recorded on /bcd_valid_area_m2
+    if bcd_valid_area_m2 is None and bag.get('bcd_valid_area_m2') is not None:
+        bcd_valid_area_m2 = bag['bcd_valid_area_m2']
+        print(f"  using BCD valid area from bag: {bcd_valid_area_m2:.2f} m²", flush=True)
+        
     is_moving = speed > stall_threshold if len(speed) else np.array([], dtype=bool)
     mean_speed_moving = float(speed[is_moving].mean()) if is_moving.any() else 0.0
     frac_moving = float(100.0 * is_moving.mean()) if len(is_moving) else 0.0
@@ -447,13 +491,7 @@ def evaluate(bag_path: Path,
             'planned_source': plan_source,
             'n_planned_points': n_planned,
         },
-        'coverage': {
-            'coverage_pct': cov['coverage_pct'] if cov else float('nan'),
-            'cleaned_area_m2': cov['cleaned_area_m2'] if cov else float('nan'),
-            'total_valid_area_m2': cov['total_valid_area_m2'] if cov else float('nan'),
-            'restricted_violations': cov['restricted_violations'] if cov else 0,
-            'restricted_violations_pct': cov['restricted_violations_pct'] if cov else 0.0,
-        },
+        'coverage': _build_coverage_report(cov, bcd_valid_area_m2),
         'trajectory_error': {
             'savg_m': savg,
             'smax_m': smax,
@@ -497,7 +535,11 @@ def format_summary(m: Dict[str, Any]) -> str:
         f"Planned source:    {r['planned_source']}  ({r['n_planned_points']} pts)",
         "",
         f"Coverage:          {c['coverage_pct']:.2f} %   "
-        f"(cleaned {c['cleaned_area_m2']:.2f} / valid {c['total_valid_area_m2']:.2f} m²)",
+        f"(cleaned {c['cleaned_area_m2']:.2f} / valid {c['total_valid_area_m2']:.2f} m²"
+        f", src={c.get('valid_area_source', 'raw_free_cells')})",
+        *(([f"  (raw white-area denominator: {c['coverage_pct_raw']:.2f} % "
+             f"over {c['total_valid_area_m2_raw']:.2f} m²)"]
+           if c.get('valid_area_source') == 'bcd_inflated' else [])),
         f"Restricted-cell hits: {c['restricted_violations']} samples "
         f"({c['restricted_violations_pct']:.2f}% of trajectory)",
         "",
@@ -775,6 +817,13 @@ def main() -> int:
                          'ground-truth odometry (e.g. offline_path_planning_conemap_df.launch '
                          'with odom_tf_broadcaster reading /ground_truth/odometry), pass '
                          '--odom-topic /ground_truth/odometry')
+    ap.add_argument('--bcd-valid-area', type=float, default=None,
+                    help='override the coverage denominator with the BCD-inflated '
+                         'free area in m² (matches Sensei\'s definition: excludes '
+                         'the ~0.5 m obstacle-inflation halo the robot physically '
+                         'cannot enter). If given, coverage_pct is recomputed as '
+                         'cleaned_area / this value; the raw white-area figure is '
+                         'kept alongside as coverage_pct_raw.')    
 
     args = ap.parse_args()
 
@@ -800,7 +849,8 @@ def main() -> int:
                          cleaning_width=args.cleaning_width,
                          stall_threshold=args.stall_threshold,
                          stall_min_duration=args.stall_min_duration,
-                         odom_topic=args.odom_topic)
+                         odom_topic=args.odom_topic,
+                         bcd_valid_area_m2=args.bcd_valid_area)
             write_outputs(m, args.output_dir, make_plots=not args.no_plots)
             rows.append(to_row(m))
             print(format_summary(m))
