@@ -1,4 +1,4 @@
 {
-    "cmake.sourceDirectory": "/home/systemlab/hakuroukun-zemi/src",
+    "cmake.sourceDirectory": "/home/hakurokun/hakuroukun-zemi/src",
     "ROS2.distro": "noetic"
 }
