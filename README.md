@@ -1,6 +1,38 @@
 # hakuroukun_ws
 ## Code for Hakuroukun Cleaning Robot
 
+This workspace holds all packages for the Hakuroukun outdoor ride-on cleaning
+robot (retrofitted IPC Silver 800, ~304 kg, Ackermann steering). The main
+thesis package is **`hakuroukun_boustrophedon_with_cones`** (Due, 2026): an
+offline Boustrophedon Cell Decomposition (BCD) coverage planner with a
+two-layer online safety architecture. The predecessor package
+`hakuroukun_tasp_with_cones` (Nguyen Van Tai, 2024) is kept as a reference
+baseline.
+
+### Workspace root
+
+```
+src/
+├── hakuroukun_boustrophedon_with_cones/  ← thesis package (BCD + online safety)
+├── hakuroukun_tasp_with_cones/           ← Tai's TASP baseline (reference)
+├── hakuroukun_communication/             ← Arduino firmware + comms node
+├── hakuroukun_control/                   ← lower-level control utilities
+├── hakuroukun_description/               ← URDF, meshes
+├── hakuroukun_dockerfiles/               ← Dockerfile, docker-compose.yml, install/, rules/ (udev)
+├── hakuroukun_launch/                    ← shared bringup (sensor, communication, lidar)
+├── hakuroukun_localization/              ← hakuroukun_pose (GPS+IMU+wheel fusion), obstacle_detection
+├── hakuroukun_navigation/                ← sdv_msgs, trajectory_generation
+├── hakuroukun_sensor/                    ← RPLIDAR, TSND151 IMU, u-blox F9P GPS drivers
+├── hakuroukun_steering_controller/       ← ros_control plugin
+├── DF_Mapping.md                         ← D-F outdoor mapping procedure (gmapping)
+├── paint_polygons.py                     ← interactive PGM polygon painter (restricted zones)
+├── sync_to_docker.sh                     ← host↔container inotify sync helper
+├── frames.pdf                            ← TF tree snapshot
+├── rosgraph.png                          ← node/topic graph snapshot
+├── gps_calib_log.txt                     ← historical GPS calibration log
+└── CMakeLists.txt
+```
+
 ### Setting up the environment
 
 -----
@@ -45,6 +77,13 @@ chmod +x ./install/xauth.sh && ./install/xauth.sh
 > **Docker lifecycle:** Use `docker compose stop` (not `down`) to preserve
 > `build/` and `devel/` between sessions. `down` wipes build artifacts and
 > forces a full `catkin_make` on next start.
+>
+> **`ROS_IP=127.0.0.1` in `docker-compose.yml`:** both the `ros-master` and
+> `hakuroukun-robot` services set `ROS_IP=127.0.0.1` explicitly. Without
+> this, Ubuntu's hostname on the lab laptop resolves to `127.0.1.1`, which
+> silently breaks TCP between ROS nodes running in the two containers —
+> `/planned_path` publishes but nothing subscribes, no error message. If
+> you migrate to a new machine, verify these lines are still present.
 >
 > **Stale roscore state (2026-07-11):** Running many sim/real launches back
 > to back on the same `roscore` session without a clean restart has caused
@@ -144,7 +183,7 @@ replaces Tai's online TASP planner from the previous study.
   pursuit-following waypoints).
 - **Online modification (two layers)**:
   - **Layer 1 — Reflex stop** (in `path_follower.py`): LiDAR `FORWARD VETO`
-    at 0.70 m. Stops the robot in milliseconds for sudden intrusions
+    at 0.90 m. Stops the robot in milliseconds for sudden intrusions
     (a child running into the path, etc.).
   - **Layer 2 — Local replanner** (`local_replanner.py`): Watches LiDAR
     for obstacles that **persist on the path for ≥ 7 seconds**, then splices
@@ -184,6 +223,11 @@ coverage completes. `/path_follower/done` is a latched Bool fired once
 when the robot has held the final coverage pose for `done_dwell_time`
 seconds; this triggers `return_to_start` to compute the A\* return path.
 
+`offline_coverage_planner.py` also publishes a latched `/bcd_valid_area_m2`
+(std_msgs/Float32) with the EDT-inflated free-space area — this is the
+denominator both `cleaning_simulator.py` (live coverage %) and
+`evaluate_real_run.py` (post-hoc coverage %) use, so the two match.
+
 **Init handshake (real robot only):** `map_odom_calibrator` also publishes
 a latched `/map_odom_calibrator/initialized` Bool that starts `False` and
 flips `True` on the first 2D Pose Estimate click in RViz. `path_follower`
@@ -210,41 +254,61 @@ map frame directly and there is no calibrator to click.
 ```
 hakuroukun_boustrophedon_with_cones/
 ├── config/
-│   ├── amcl_params.yaml              ← AMCL tuning (simulation only)
-│   ├── boustrophedon_config.yaml     ← BCD parameters (lane spacing, robot radius)
-│   ├── path_follower_config.yaml     ← pure pursuit (lookahead=0.8, search_ahead=25)
-│   ├── local_replanner_config.yaml   ← persistence threshold, window size, etc.
+│   ├── amcl_params.yaml                 ← AMCL tuning (simulation only)
+│   ├── boustrophedon_config.yaml        ← BCD parameters (robot_radius=1.0, lane_spacing=1.3, turn_margin=0.80)
+│   ├── path_follower_config.yaml        ← pure pursuit (lookahead=0.8, search_ahead=25, obstacle_stop_range=0.90)
+│   ├── local_replanner_config.yaml      ← persistence=7s, window=15m, lookahead=7m, obstacle_inflate=1.2m
 │   ├── costmap_params.yaml
-│   └── gmapping_params.yaml
+│   ├── gmapping_params.yaml             ← sim mapping (mapping_warehouse.launch)
+│   ├── gmapping_params_real.yaml        ← real D-F mapping (df_mapping_real.launch)
+│   └── gps_rotation_calibration_sim.yaml ← sim override (both values 0.0; real value lives in hakuroukun_pose/)
 ├── launch/
 │   ├── bringup_hakuroukun_conemap_sim.launch     ← Gazebo + robot (conemap world)
 │   ├── bringup_hakuroukun_warehouse_sim.launch   ← Gazebo + robot (warehouse world)
+│   ├── bringup_hakuroukun_df.launch              ← Gazebo + robot (D-F world, sim mirror of outdoor site)
+│   ├── bringup_hakuroukun_df_flat.launch         ← Gazebo D-F on flat ground (no terrain mesh)
 │   ├── bringup_hakuroukun_robot.launch           ← Real robot bringup
-│   ├── offline_path_planning_conemap.launch      ← Planner + replanner + follower (conemap)
-│   ├── offline_path_planning.launch              ← Planner + replanner + follower (warehouse)
-│   ├── offline_path_planning_real.launch         ← Planner + replanner + follower (real robot, no AMCL)
-│   ├── mapping_warehouse.launch                  ← gmapping (only needed to rebuild maps)
+│   ├── offline_path_planning_conemap.launch      ← Planner + replanner + follower (conemap sim, AMCL)
+│   ├── offline_path_planning.launch              ← Planner + replanner + follower (warehouse sim, AMCL)
+│   ├── offline_path_planning_df.launch           ← Planner + replanner + follower (D-F sim)
+│   ├── offline_path_planning_df_outline.launch   ← D-F outline-map variant
+│   ├── offline_path_planning_real.launch         ← Planner + replanner + follower + return-to-start (real robot, no AMCL)
+│   ├── df_mapping_real.launch                    ← gmapping the D-F outdoor field (see DF_Mapping.md)
+│   ├── df_mapping.launch / df_mapping_minimal.launch
+│   ├── mapping_warehouse.launch                  ← gmapping (sim, only needed to rebuild warehouse map)
+│   ├── slam_gmapping.launch
 │   ├── gazebo_cones.launch / gazebo_cones_warehouse.launch
+│   ├── gazebo_df.launch / gazebo_df_flat.launch
+│   ├── gps_test.launch
+│   └── straight_line_test.launch                 ← GPS rotation angle validation
 ├── maps/
-│   ├── conemap_planning.{pgm,yaml}   ← main map used for thesis experiments
+│   ├── conemap_planning.{pgm,yaml}      ← main map used for simulation thesis experiments
+│   ├── conemap_walls_cones.{pgm,yaml}
+│   ├── df_area_planning.{pgm,yaml}      ← real-world thesis map (GPS-derived, 308.75 m² valid)
+│   ├── df_area_outline.{pgm,yaml}       ← D-F outline-only variant
+│   ├── df_area_outline_painted.{pgm,yaml}
 │   ├── warehouse_map.{pgm,yaml}
-│   └── ...
+│   └── saved_map.{pgm,yaml}
 ├── scripts/
 │   ├── planning/
-│   │   ├── offline_coverage_planner.py   ← BCD; publishes /planned_path
-│   │   ├── return_to_start.py            ← A* return-to-home leg after /done
+│   │   ├── offline_coverage_planner.py   ← BCD; publishes /planned_path, /bcd_valid_area_m2
+│   │   ├── return_to_start.py            ← A* return-to-home leg after /path_follower/done
 │   │   └── simple_astar.py
 │   ├── control/
 │   │   ├── path_follower.py              ← pure pursuit + reflex stop + init-handshake gate
-│   │   ├── local_replanner.py            ← online detour layer
-│   │   ├── return_to_start.py            ← A* return to baseline[0] on /path_follower/done
+│   │   ├── local_replanner.py            ← online persistence-gated detour layer
 │   │   ├── map_odom_calibrator.py        ← dynamic map→odom TF + init-handshake publisher
 │   │   ├── odom_tf_broadcaster.py        ← real-robot odom→base_link TF
-│   │   └── sim_teleop_key.py
+│   │   ├── map_manager.py                ← shared map-loading helpers
+│   │   ├── keyboard_teleop.py            ← manual driving w/ keyboardmode.ino (needs python3)
+│   │   ├── sim_teleop_key.py             ← sim-only Twist teleop
+│   │   └── publish_initial_pose.py       ← programmatic AMCL initialpose helper (sim)
 │   ├── evaluation/
 │   │   ├── cleaning_simulator.py         ← live coverage % (publishes /cleaned_map)
 │   │   ├── calculate_coverage_from_image.py
-│   │   └── caculate_average_error.py     ← Savg / Smax / RMS trajectory error
+│   │   ├── caculate_average_error.py     ← Savg / Smax / RMS trajectory error (live)
+│   │   ├── caculate_coverage.py
+│   │   └── evaluate_real_run.py          ← post-hoc rosbag → all thesis metrics (see below)
 │   ├── obstacles/
 │   │   ├── cone_zone_creator.py
 │   │   └── cones_detector_simulation.py
@@ -254,11 +318,18 @@ hakuroukun_boustrophedon_with_cones/
 │       ├── visualizer.py
 │       └── health_check.py
 ├── worlds/
-│   ├── 30x30area.world                   ← conemap world (main thesis sim)
+│   ├── 30x30area.world                   ← conemap world (main sim thesis map)
 │   ├── 10x10area.world
+│   ├── df_area.world                     ← D-F outdoor site mirror
+│   ├── flat_ground.world
 │   └── hakuroukun_warehouse_v1.world
 ├── rviz/
-│   └── boustrophedon_with_cones.rviz
+│   ├── boustrophedon_with_cones.rviz
+│   ├── df_mapping.rviz
+│   ├── mapping.rviz
+│   ├── straight_line_test.rviz
+│   └── view_robot.rviz
+├── acrhive/                              ← archived old launch/config/results (sic: folder name)
 ├── SIM_TEST_PROCEDURE.md                 ← detailed obstacle test scenarios A/B/C
 ├── package.xml
 └── CMakeLists.txt
@@ -280,7 +351,7 @@ find src/hakuroukun_boustrophedon_with_cones/scripts -name "*.py" -exec chmod +x
 ### Simulation — conemap (main thesis scenario)
 
 The conemap uses pre-painted cone polygons as restricted zones. It is the
-main environment for thesis quantitative results.
+main environment for thesis simulation quantitative results.
 
 Use 5 terminals in this order. Each terminal needs its own
 `docker exec -it hakuroukun-robot bash`.
@@ -400,6 +471,33 @@ rosrun hakuroukun_boustrophedon_with_cones test_obstacle_spawner.py \
     static --x 5.0 --y 2.0
 ```
 
+### D-F outdoor field mapping
+
+The real-world thesis experiments used a GPS-derived static map of the D-F
+outdoor area at TUT, not the painted conemap. Build this map only when the
+GPS unit has been remounted or the field layout has changed — the existing
+`maps/df_area_planning.{pgm,yaml}` is what the thesis Run 1 and Run 2 both
+used.
+
+The full mapping procedure (prerequisites, 5-terminal layout, driving
+pattern, save/verify steps, gmapping troubleshooting, offline re-mapping
+from a rosbag) lives in [`DF_Mapping.md`](./DF_Mapping.md) at the
+workspace root. Two things worth reading before you start:
+
+- **gmapping fails in open field.** Without wall/fence scan anchors,
+  scan matching diverges (`Likelihood ≈ -166` in the log). Start mapping
+  positioned near the perimeter fence, and drive so the LiDAR sees a
+  wall for at least the first ~20 s before venturing into open ground.
+- **Always record the whole session with `rosbag record -a`.** If the
+  live map turns out badly, you can re-run gmapping offline from the
+  bag with tuned parameters — no second field trip needed.
+
+If you need to update the restricted-zone polygons on an existing PGM
+without re-mapping, use `paint_polygons.py` at the workspace root
+(interactive matplotlib polygon painter, outputs a P5 PGM with only
+`{0, 205, 254}` pixel values). Copy the existing YAML alongside and
+just change its `image:` field.
+
 ### Real robot
 
 This section follows the same structure as Tai's `hakuroukun_tasp_with_cones`
@@ -419,7 +517,9 @@ Key differences from simulation:
   motion commands.
 - `odom → base_link` is published by `odom_tf_broadcaster.py` from
   `/hakuroukun_pose/rear_wheel_odometry`.
-- Same `conemap_planning.yaml` map; no fresh gmapping needed.
+- Uses the **GPS-derived `df_area_planning.yaml`** as the planning map (the
+  default in `offline_path_planning_real.launch`), not `conemap_planning.yaml`.
+  The thesis Run 1 (58.57% coverage) and Run 2 (55.94%) both used this map.
 - **No live cone detection**. Cones are pre-painted
   into the planning map and physically placed at matching positions on the
   ground before the run.
@@ -427,7 +527,7 @@ Key differences from simulation:
 #### 1. Set up experiment environment
 
 Place the physical cones on the ground at positions matching the polygons
-painted into `conemap_planning.pgm`. The cones define restricted zones the
+painted into `df_area_planning.pgm`. The cones define restricted zones the
 planner must not cross.
 
 - 10 cones total.
@@ -435,21 +535,22 @@ planner must not cross.
   `scripts/tools/` if needed.
 
 > **obstacle_stop_range note:** `path_follower_config.yaml` sets
-> `obstacle_stop_range: 0.70 m`. The robot will enter HOLD if the LiDAR
-> sees anything within 0.70 m, including physical cones. If the cone
+> `obstacle_stop_range: 0.90 m`. The robot will enter HOLD if the LiDAR
+> sees anything within 0.90 m, including physical cones. If the cone
 > positions on the ground don't perfectly match the painted polygons in the
 > map, the robot may trigger unexpected HOLDs near cone boundaries. Watch
 > for this on the first run.
 >
 > **`front_stop_range` note (2026-07-11):** there is a related but
 > separate legacy REVERSE-recovery threshold, `front_stop_range` in
-> `path_follower_config.yaml`. If this sits between `obstacle_stop_range`
-> (0.70 m) and the intended HOLD trigger, obstacles in that band can fall
-> through to legacy REVERSE recovery instead of the persistence-gated A*
-> replanner — bypassing the thesis's core replanning contribution for
-> that obstacle. Confirm `front_stop_range` matches your intended test
-> (0.70 for replanner testing; a larger value like 1.50 is acceptable
-> only when you deliberately are NOT testing obstacle avoidance that day).
+> `path_follower_config.yaml` (currently 1.50 m). If this sits between
+> `obstacle_stop_range` (0.90 m) and the intended HOLD trigger, obstacles
+> in that band can fall through to legacy REVERSE recovery instead of
+> the persistence-gated A* replanner — bypassing the thesis's core
+> replanning contribution for that obstacle. Confirm `front_stop_range`
+> matches your intended test (drop to ~0.90 for pure replanner testing;
+> the current 1.50 is acceptable only when you deliberately are NOT
+> testing the replanner that day).
 
 #### 2. Robot setup
 
@@ -647,6 +748,16 @@ upload one of:
 > fix above. Root cause not yet found. Does not appear to block motion
 > (isolated drops), but worth investigating if tracking issues persist
 > after ruling out calibration/localization causes.
+>
+> **Reverse-gear command rejection is the current dominant hardware
+> failure mode.** Thesis Run 2 diagnostic: **366 of 408 commanded reverse
+> events (89.7%) were not physically executed** — the gear actuator
+> remained in forward despite the command. This is the primary driver
+> of the ~15-19% run-time spent stalled in both field runs, and directly
+> caps achievable coverage. Both runs finished the majority of the
+> planned path anyway (58.57% / 55.94%), but any recovery maneuver that
+> requires reverse is at high risk of stalling. Not yet resolved at the
+> firmware/actuator level.
 
 #### 3. Run experiment (5 terminals)
 
@@ -675,6 +786,12 @@ mkdir -p /root/catkin_ws/bags && cd /root/catkin_ws/bags
 rosbag record -a -O real_run_$(date +%Y%m%d_%H%M%S).bag \
     __name:=real_recorder
 ```
+> Always use `-a` for real runs. `evaluate_real_run.py` (see below) needs
+> `/fix`, `/hakuroukun_pose/rear_wheel_odometry`, `/cmd_controller`,
+> `/hakuroukun/gear_state`, `/tf`, `/planned_path` (or `/desired_path`),
+> and `/map` all together to reproduce the thesis numbers. Selectively
+> recorded bags will silently produce partial metrics — the thesis Run 1
+> lost gear-rejection and GPS-covariance metrics for exactly this reason.
 
 **T3 — Cleaning simulator** (marks cells under the robot as cleaned, publishes `/cleaned_map`):
 ```bash
@@ -685,6 +802,10 @@ rosrun hakuroukun_boustrophedon_with_cones cleaning_simulator.py
 ```bash
 roslaunch hakuroukun_boustrophedon_with_cones offline_path_planning_real.launch
 ```
+This defaults to `map_file:=df_area_planning.yaml`. Pass
+`map_file:=<other>.yaml` on the command line only if you deliberately
+want a different map — the thesis results are all on this default.
+
 > **Expected log immediately after T4 comes up:**
 > ```
 > [map_odom_calibrator] /map_odom_calibrator/initialized = False.
@@ -704,7 +825,8 @@ rosrun hakuroukun_boustrophedon_with_cones calculate_coverage_from_image.py
 ```
 
 **Stopping:** `rosnode kill /real_recorder` first to flush the bag, then shut
-down the launches.
+down the launches. Then process the bag through `evaluate_real_run.py` for
+the reportable metrics (see "Post-run evaluation" below).
 
 #### Calibrating `map → odom` with RViz (required every experiment day)
 
@@ -778,7 +900,7 @@ correctly.
 
 > **LiDAR range note:** The laser merger has `range_min: 0.3 m`. Obstacles
 > closer than 0.3 m are invisible to `/scan_multi`. The path follower's
-> `obstacle_stop_range` is 0.70 m, well within this window.
+> `obstacle_stop_range` is 0.90 m, well within this window.
 
 ---
 
@@ -847,29 +969,180 @@ behavior ever changes, both this script and `hakuroukun_pose.py`'s
 
 ---
 
-### Simulation results (thesis runs)
+### Post-run evaluation — `evaluate_real_run.py`
 
-Runs 1 and 2 had three bugs present (see table above) that partially suppressed
-detour behavior and caused `closest_i` jumps. Run 3 is the corrected
-implementation after all three bugs were fixed.
+**Location:** `scripts/evaluation/evaluate_real_run.py`
 
-| Run | Bag | Coverage | Detours fired | Notes |
-|-----|-----|----------|---------------|-------|
-| Run 1 | `conemap_with_return_20260626_031733.bag` | 65.20% | 1 | Partial — `obs_first` recenter bug + `ROS_IP` bug + `closest_i` jump bug present |
-| Run 2 | `conemap_run_20260626_052306.bag` | 63.96% | 2 | Partial — same three bugs present |
-| Run 3 | `conemap_run_20260702_*.bag` | **91.21%** | — | **Corrected implementation** — all three bugs fixed |
+The canonical post-hoc evaluation tool. Reads a rosbag and produces
+every metric reported in the thesis (Chapter 4 sim tables and Chapter 5
+real-world tables), so a fresh run can be quoted against the same
+methodology with no manual bookkeeping.
 
-Baseline comparison: Tai's TASP = 52.80%.
+**Metrics produced per bag:**
+- Coverage % (occupancy-grid raster of trajectory ⊗ 1.0 m cleaning footprint
+  against BCD-inflated free cells from `/bcd_valid_area_m2`, falling back
+  to raw free cells if the latched Float32 wasn't recorded).
+- Trajectory error `Savg` / `Smax` / `RMS` (nearest-neighbor, planned →
+  actual) — the same nearest-neighbor method Tai (2024) used, so results
+  are directly comparable across baselines.
+- Duration, path length, mean speed in motion, % of run in motion.
+- Stalls (`< 0.02 m/s for ≥ 3.0 s`): count + total time + % of run.
+- Reverse gear command rejection: commanded vs. actual from
+  `/hakuroukun/gear_state` (thesis Run 2: 89.7%).
+- GPS quality: position covariance min / median / max, fix count, fix-status
+  histogram, max gap between fixes.
+- Restricted-cell hits: trajectory samples falling in occupied map cells
+  (thesis Run 1: 5.02%, Run 2: 5.96% — remember these represent map/reality
+  misalignment on the GPS-derived map, not physical collisions).
+- 6-panel diagnostic plot (`<stem>_plot.png`).
 
-**Real-world run, 2026-07-11:** first successful autonomous run with a
-moving vehicle following `/desired_path` for sustained stretches after
-the accel-breakaway and steering-hysteresis fixes above (`closest_i`
-advanced 0→82 of 3462 points in one continuous segment). Not yet a clean
-full-coverage run — visible large-scale path deviation (cutting across
-rows rather than tracking lanes cleanly) observed, currently suspected to
-be a stale GPS rotation angle following a period where the GPS unit was
-borrowed by other lab members; `gps_rotation_calibrator.py` (see above)
-was built in response and should be run before the next outdoor attempt.
+**Usage:**
+```bash
+# single bag
+python3 scripts/evaluation/evaluate_real_run.py /path/to/run.bag \
+    --output-dir results/ --cleaning-width 1.0
+
+# batch (glob or multiple explicit paths)
+python3 scripts/evaluation/evaluate_real_run.py \
+    --batch bags/real_run_*.bag --output-dir results/
+# → per-bag summary.txt + metrics.json + plot.png, plus a
+#   comparison_YYYYMMDD_HHMMSS.csv sorted by coverage%
+```
+
+**Required packages** (in the container): `numpy pandas matplotlib rosbags`.
+Install with `pip install --user rosbags pandas matplotlib numpy` if
+missing.
+
+**Topics the bag must contain** (all standard Hakuroukun stack):
+`/fix`, `/hakuroukun_pose/rear_wheel_odometry`, `/cmd_controller`,
+`/hakuroukun/gear_state`, `/tf`, `/planned_path` (or `/desired_path`), `/map`.
+See the T2 rosbag note above — use `-a` on real runs to guarantee all
+of these get recorded.
+
+---
+
+### Simulation results (thesis)
+
+Two simulation runs are reported in the thesis, both on the D-F conemap
+environment (`conemap_planning.yaml`, 444.29 m² raw free area, 334.44 m²
+BCD-inflated valid area). Run 1 is the obstacle-free baseline; Run 2
+injects a cylindrical obstacle to exercise the two-layer safety architecture.
+
+| Metric | Run 1 (no obstacle) | Run 2 (with obstacle) |
+|---|---|---|
+| Coverage (raw denom) | **60.00%** | **54.41%** |
+| Cleaned area | 266.56 m² | 241.73 m² |
+| Duration | 22.89 min | 23.88 min |
+| Path length | 330.27 m | 307.84 m |
+| Savg | 0.25 m | 0.40 m |
+| Smax | 0.92 m | 3.57 m |
+| RMS | 0.32 m | 0.75 m |
+| Planned pts > 1 m off | 0 | 167 (8.3%) |
+| Stall count / total | 11 / 130.5 s (9.5%) | 13 / 182.3 s (12.7%) |
+| Restricted-cell hits | 0 | 0 |
+
+**Baseline (Tai TASP, 2024):** 52.80% sim coverage on a different map
+configuration (718.18 m² valid area). Because the two evaluations use
+different map extents and cone layouts, a direct coverage % comparison
+is not controlled. **What can be compared like-for-like** is trajectory
+tracking under equivalent methodology: Run 1's Savg 0.25 m and Smax 0.92 m
+are tighter than Tai's Savg 0.31 m / Smax 1.19 m, indicating cleaner lane
+following.
+
+**Notes on Run 2:**
+- Zero restricted-cell hits confirms the pre-encoded cone polygons are
+  respected throughout.
+- The replanner **fired once successfully** (rerouted around the first
+  cylindrical obstacle, rejoined the coverage lanes) and **failed to
+  trigger** on a second obstacle encounter later in the run. The 167
+  planned points > 1 m off (and the Smax = 3.57 m spike) are concentrated
+  at the location of that second unresolved encounter — this is a
+  software-level replanner issue under investigation, not a design flaw.
+- The 4.5-point coverage drop between Run 1 and Run 2 (60.00 → 54.41%)
+  is the cost of incomplete obstacle recovery, not the cost of running
+  the two-layer safety architecture itself.
+
+**Development history** (for context, not for reporting): several
+earlier sim runs during development yielded 65% / 64% / 91% coverage
+figures under a range of measurement conventions and mid-development
+bug states. Three bugs were fixed on the path to the numbers above:
+`obs_first`/`obs_grid` recenter lockstep, `ROS_IP=127.0.0.1` in
+docker-compose, and `closest_i` seeding on new path arrival during HOLD.
+The numbers reported in this section and the thesis are from the
+corrected implementation with all three fixes applied, evaluated by
+`evaluate_real_run.py` against the same denominator basis as the
+real-world runs.
+
+---
+
+### Real-world results (thesis)
+
+Two field runs on 2026-07-20 at the D-F outdoor field area (TUT campus),
+both on the GPS-derived `df_area_planning.yaml` map (308.75 m² valid area).
+Both runs were fully evaluated post-hoc via `evaluate_real_run.py` from the
+same `bcd_automode.ino` autonomous run — no manual seeding beyond the
+2D Pose Estimate click.
+
+| Metric | Run 1 (run3.bag) | Run 2 (run4.bag) |
+|---|---|---|
+| Coverage | **58.57%** | **55.94%** |
+| Cleaned area | 180.84 m² | 172.72 m² |
+| Duration | 31.73 min | 30.54 min |
+| Path length | 294.16 m | 281.10 m |
+| Savg | 0.38 m | 0.38 m |
+| Smax | 1.35 m | 1.30 m |
+| RMS | 0.47 m | 0.46 m |
+| Planned pts > 1 m off | 43 (3.9%) | 28 (2.6%) |
+| Stall count / total | 23 / 355.1 s (18.7%) | 23 / 276.6 s (15.1%) |
+| Reverse cmds rejected | not recorded | **366 / 408 (89.7%)** |
+| GPS cov median / max | not recorded | 1.69e-4 / 4.41e-4 m² |
+| Restricted-cell hits | 950 (5.02%) | 1059 (5.96%) |
+
+Run 1 was recorded without gear-state and GPS topics in the bag, so
+reverse-rejection rate and GPS quality metrics are unavailable for that
+run. Both runs used the same autonomous stack; the similar stall counts
+(23 each) suggest the reverse-rejection fault was active in Run 1 as well.
+
+**Baseline (Tai TASP, 2024, same physical field):** 38.07% coverage on
+411.46 m² valid area, duration 11 min 46 s. Different map (larger valid
+area, different cone layout), so this is a context comparison, not a
+controlled one.
+
+**Key qualitative findings** (from thesis §5.4):
+
+- **No physical collisions in either run.** The robot did not strike any
+  wall, cone, or pole. Both runs terminated by stopping in a safe area.
+- **Restricted-cell hits reflect map inaccuracy, not real violations.**
+  The GPS-corner-derived map approximates the field but does not match
+  the actual geometry with full accuracy — the robot occasionally
+  traversed open ground that the map labels as restricted. Physical
+  restricted zones were respected.
+- **Layer 2 (Persistence-Gated A\* replanner) did not trigger** in either
+  field run. No sustained-obstacle scenarios arose that met the 7 s
+  persistence threshold during the runs.
+- **Layer 1 (Reflex HOLD) fired reliably against walls** (D-building
+  staircase and adjacent garden patch in Run 2 — visible as a looping
+  recovery trajectory in the RViz sequence), but showed **inconsistent
+  detection against lower-profile objects** like cones and persons in
+  close proximity. Root cause not conclusively identified in the field;
+  candidates include sensor detection-range thresholds not being met
+  for low-profile obstacles.
+- **Reverse-gear command rejection is the dominant hardware limitation.**
+  89.7% of commanded reverse events in Run 2 were not physically executed.
+  This directly caps how many recovery maneuvers can complete, and is
+  the single biggest lever for improving real-world coverage.
+- **Heading drift over long runs.** The TSND151 magnetometer is disabled
+  (chassis magnetic interference), so map-frame yaw is derived entirely
+  from gyro integration seeded at startup — no absolute heading correction
+  during the run. Over ~30 min with frequent recovery-maneuver direction
+  changes, this compounds into visible lateral offset from planned sweep
+  lanes in the later phase of Run 2.
+- **Both field runs exceeded the TASP real-world baseline (38.07%)**
+  within the same physical environment despite the reverse-rejection fault.
+  Different maps and cone layouts prevent this from being a controlled
+  comparison, but the direction is consistent: offline BCD produces more
+  complete traversal than the reactive TASP approach even under hardware
+  constraints.
 
 ---
 
@@ -877,7 +1150,8 @@ was built in response and should be run before the next outdoor attempt.
 
 - Choset & Pignon, 1998 — Boustrophedon Cell Decomposition.
 - Galceran & Carreras, 2013 — CPP survey.
-- Nguyen Van Tai, 2024 — previous TASP work in this lab (baseline: 52.80% coverage).
+- Nguyen Van Tai, 2024 — previous TASP work in this lab (baselines:
+  52.80% sim, 38.07% real; Savg 0.31 m, Smax 1.19 m sim).
 - Schmid et al., 2023 — Dynablox (IEEE RA-L, DOI: 10.1109/LRA.2023.3305239) — supports "persistence-gated" obstacle terminology.
 - Kondo et al., 2026 — SANDO (arXiv:2604.07599) — supports "persistence-gated" replanning concept.
 
@@ -886,23 +1160,31 @@ was built in response and should be run before the next outdoor attempt.
 - Coverage % is computed with `cleaning_width = 1.0 m` to stay comparable to
   Tai's results.
 - Unknown cells (`-1`) in the OccupancyGrid are **not** counted as free in
-  the coverage denominator.
+  the coverage denominator. The reported coverage denominator is the
+  EDT-inflated free space where BCD generates lanes, published by
+  `offline_coverage_planner.py` on the latched `/bcd_valid_area_m2`
+  (`std_msgs/Float32`) topic. `cleaning_simulator.py` (live) and
+  `evaluate_real_run.py` (post-hoc) both consume this topic, so live
+  and reported numbers use the same basis.
 - `path_follower_config.yaml` ships with `lookahead_distance: 0.8` and
   `max_search_ahead: 25`. Larger values caused oscillation at U-turns.
-- `path_follower_config.yaml` has `obstacle_stop_range: 0.70 m` (HOLD trigger)
-  and `front_clear_range: 1.0 m` (HOLD→FORWARD clear threshold). The 0.30 m
+- `path_follower_config.yaml` has `obstacle_stop_range: 0.90 m` (HOLD trigger)
+  and `front_clear_range: 1.0 m` (HOLD→FORWARD clear threshold). The 0.10 m
   hysteresis between these values prevents mode chatter. See also the
-  `front_stop_range` note under "Real robot → 1. Set up experiment
-  environment" — a separate, related threshold that must be set
-  deliberately depending on whether you're testing obstacle avoidance
-  that day.
+  `front_stop_range` (1.50 m) note under "Real robot → 1. Set up
+  experiment environment" — a separate, related reverse-recovery
+  threshold that must be set deliberately depending on whether you're
+  testing obstacle avoidance that day.
 - `path_follower_config.yaml` does **not** set `done_dwell_time` — the code
   default of 2.0 s is used. The robot must hold the final coverage pose for
   2.0 s before `/path_follower/done` fires, filtering out end-of-path wiggle.
-- `local_replanner_config.yaml` has `obstacle_inflate_m: 0.9` for dynamic
-  obstacles — this must stay **larger** than the robot's physical half-width
-  (~0.81 m); a smaller value (this has been observed drifting to 0.7 m)
-  lets A* plan detour arcs that physically clip obstacles.
+- `local_replanner_config.yaml` has `obstacle_inflate_m: 1.2` for dynamic
+  obstacles. This must stay **larger** than the robot's physical half-width
+  (~0.81 m); a smaller value (has been observed drifting to 0.7 m during
+  tuning) lets A\* plan detour arcs that physically clip obstacles.
+  There is an outdated comment inside the YAML claiming the value was
+  lowered to 0.9 m — the comment is stale; the actual live value is 1.2 m.
+  If you re-tune, keep both the value and the comment consistent.
 - `MAX_ACCEL`, `MAX_STEERING`, `MIN_STEERING` in `path_follower.py` are loaded
   from `/hakuroukun_steering_controller/` namespace, which is **not set** by
   any real-robot launch file. Code defaults (2.5, ±0.78 rad) are used silently
@@ -943,3 +1225,8 @@ was built in response and should be run before the next outdoor attempt.
   **dead duplicate** — never imported, never launched by any current launch
   file. Do not edit it expecting changes to take effect; edit
   `hakuroukun_pose/hakuroukun_pose/hakuroukun_pose.py` instead.
+- `gps_rotation_calibration_sim.yaml` (in this package's `config/`) sets
+  both values to 0.0 for simulation — sim uses `/ground_truth/odometry`
+  and does not need a GPS rotation correction. The real-world calibration
+  file lives separately at `hakuroukun_pose/config/gps_rotation_calibration.yaml`
+  and is what `hakuroukun_pose.py` loads at startup.
