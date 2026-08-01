@@ -11,7 +11,7 @@
 
     <arg name="open_rviz"          default="true"/>
     <arg name="use_static_map"     default="true"/>
-    <arg name="map_file"           default="$(find hakuroukun_boustrophedon_with_cones)/maps/df_area_planning.yaml"/>
+    <arg name="map_file"           default="$(find hakuroukun_boustrophedon_with_cones)/maps/df_area_outline_painted.yaml"/>
     <arg name="auto_initial_pose"  default="true"/>
     <arg name="init_x"             default="0.0"/>
     <arg name="init_y"             default="0.0"/>
