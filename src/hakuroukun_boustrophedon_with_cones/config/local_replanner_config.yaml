@@ -32,7 +32,7 @@ local_replanner:
 
   # After the last blocked path index, rejoin the baseline this many metres
   # further on so the rejoin point has clearance.
-  rejoin_margin_m: 5
+  rejoin_margin_m: 3.0
 
   # Inflation applied to detected obstacles when building the A* detour grid (m).
   # Previously 1.2m (larger than robot_radius=1.0m) to account for rear overhang.
@@ -40,7 +40,7 @@ local_replanner:
   # 1.2m inflation made small obstacles look like wall segments, blocking A*.
   # 0.9m gives the robot's 0.81m half-width a small safety margin without
   # over-inflating small objects.
-  obstacle_inflate_m: 1.2
+  obstacle_inflate_m: 1.0
 
   # ---- blockage detection ---------------------------------------------------
   # How close the path may pass to a persistent obstacle before that path point
