@@ -635,12 +635,8 @@ def make_plot(m: Dict[str, Any], out_path: Path) -> None:
     ax.plot(traj['x'].values, traj['y'].values, 'r-', lw=0.5, alpha=0.5)
     ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax); ax.set_aspect('equal')
     c = m['coverage']
-    title = (f"Coverage = {c['coverage_pct']:.2f}%   "
-            f"({c['cleaned_area_m2']:.1f}/{c['total_valid_area_m2']:.1f} m²"
-            f", src={c.get('valid_area_source', 'raw_free_cells')})")
-    if c.get('valid_area_source') == 'bcd_inflated':
-        title += f"\n(raw: {c['coverage_pct_raw']:.2f}% over {c['total_valid_area_m2_raw']:.1f} m²)"
-    ax.set_title(title, fontsize=10)
+    ax.set_title(f"Coverage = {c['coverage_pct']:.2f}%   "
+                f"({c['cleaned_area_m2']:.1f}/{c['total_valid_area_m2']:.1f} m²)")
     ax.set_xlabel('x [m]'); ax.set_ylabel('y [m]'); ax.grid(alpha=0.3)
 
     # --- speed + reverse-command overlay ---
