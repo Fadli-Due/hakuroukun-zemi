@@ -26,7 +26,10 @@ class PurePursuitNode:
         self.wheelbase        = rospy.get_param(f"{pp_ns}/wheelbase", 1.1)
         self.ctrl_rate        = rospy.get_param(f"{pp_ns}/control_rate", 10)
         self.skip_on_timeout  = rospy.get_param(f"{pp_ns}/skip_on_timeout", 40)
-        self.obstacle_stop_range = rospy.get_param(f"{pp_ns}/obstacle_stop_range", 0.45)
+        self.obstacle_stop_range = rospy.get_param(f"{pp_ns}/obstacle_stop_range", 0.70)
+        self.hold_half_width = rospy.get_param(f"{pp_ns}/hold_corridor_half_width", 0.55)
+        self.hold_max_range  = rospy.get_param(f"{pp_ns}/hold_corridor_max_range",  3.0)
+        self.hold_front_offset = rospy.get_param(f"{pp_ns}/hold_front_offset", 0.0)
 
         # ========== Reverse parameters ==========
         rp = rospy.get_param("reverse", {})
@@ -201,19 +204,53 @@ class PurePursuitNode:
             self.min_front = float('inf')
             return
 
-        angles = msg.angle_min + np.arange(n) * msg.angle_increment
-        mask   = np.abs(angles) <= self.front_fov/2.0
-        if not np.any(mask):
+        # Transform points into base_link ONLY to select the forward corridor —
+        # "forward" is a base_link concept, and the merged-scan frame's 0-angle is
+        # NOT robot-forward (that mismatch is why the old wedge saw nothing).
+        try:
+            tr = self.tf_buf.lookup_transform(
+                "base_link", msg.header.frame_id or "laser_link",
+                rospy.Time(0), rospy.Duration(0.05))
+        except Exception as e:
+            rospy.logwarn_throttle(2.0, f"[path_follower] laser->base_link TF: {e}")
             self.min_front = float('inf')
             return
 
-        rng = np.asarray(msg.ranges)[mask]
-        rng = rng[np.isfinite(rng)]
-        if msg.range_min > 0:
-            rng = rng[rng >= msg.range_min]
-        rng = rng[rng > 0.02]
+        q = tr.transform.rotation
+        yaw = math.atan2(2.0*(q.w*q.z + q.x*q.y),
+                        1.0 - 2.0*(q.y*q.y + q.z*q.z))
+        c, s = math.cos(yaw), math.sin(yaw)
+        tx, ty = tr.transform.translation.x, tr.transform.translation.y
 
-        self.min_front = float(np.min(rng)) if rng.size else float('inf')
+        angles = msg.angle_min + np.arange(n, dtype=np.float32) * msg.angle_increment
+        ranges = np.asarray(msg.ranges, dtype=np.float32)
+        valid = (np.isfinite(ranges) &
+                (ranges >= max(msg.range_min, 0.05)) &
+                (ranges <= min(msg.range_max, 10.0)))
+        if not np.any(valid):
+            self.min_front = float('inf')
+            return
+
+        r  = ranges[valid]; a = angles[valid]
+        xl = r*np.cos(a);   yl = r*np.sin(a)
+        xb = c*xl - s*yl + tx      # point x in base_link
+        yb = s*xl + c*yl + ty      # point y in base_link
+
+        # Forward corridor: ahead of the FRONT of the robot, within half the lane width.
+        fo = self.hold_front_offset
+        front = ((xb > fo) &
+                (xb < fo + self.hold_max_range) &
+                (np.abs(yb) < self.hold_half_width))
+        if not np.any(front):
+            self.min_front = float('inf')
+            return
+
+        # Distance from the front of the robot to the nearest in-corridor point.
+        self.min_front = float((xb[front] - fo).min())
+
+        rospy.loginfo_throttle(
+            1.0,
+            f"[path_follower] min_front={self.min_front:.2f} n_front={int(front.sum())}")
 
     # ---------- Main loop ----------
     def run(self):
@@ -543,7 +580,7 @@ class PurePursuitNode:
                 f"[path_follower] Steering wiggle active (stuck {stuck_elapsed:.1f}s) to break friction."
             )
 
-        if is_stuck_now:
+        if is_stuck_now and self.min_front >= self.front_stop:
             # Bypass curvature limitations when stuck to generate maximum break-free torque
             desired_speed = self.MAX_SPEED
             rospy.logwarn_throttle(
