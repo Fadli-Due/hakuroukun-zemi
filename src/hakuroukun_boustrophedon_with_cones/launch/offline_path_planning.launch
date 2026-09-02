@@ -1,12 +1,37 @@
 <launch>
-    <!-- Arguments -->
-    <arg name="open_rviz"       default="true"/>
-    <arg name="use_static_map"  default="true"/>
-    <arg name="map_file"        default="$(find hakuroukun_boustrophedon_with_cones)/maps/warehouse_map.yaml"/>
+    <!-- Warehouse simulation variant of offline_path_planning.launch.
+
+         Design notes (mirrors offline_path_planning_df_sim.launch):
+           * AMCL is intentionally skipped. The robot spawns at the map
+             origin (0, 0, 0), so map == odom by construction and
+             probabilistic laser localization is unnecessary.
+           * map -> odom is a static identity transform published via
+             tf2_ros static_transform_publisher.
+           * odom -> base_link is provided by Gazebo (via the
+             hakuroukun_steering_controller plugin), so odom_tf_broadcaster.py
+             is NOT run here (unlike the D-F sim, which relies on
+             /ground_truth/odometry).
+           * The /map_odom_calibrator/initialized gate is released
+             automatically at launch by publish_initial_pose.py — no need
+             to click "2D Pose Estimate" in RViz.
+           * Planner, local replanner and path follower are unchanged.
+
+         Prerequisites: bringup_hakuroukun_warehouse_sim.launch must be
+         running first (Gazebo + laser filters + /scan_multi + pose node).
+         If you spawn the robot at a nonzero pose in bringup, pass the same
+         values via init_x/init_y/init_yaw here so the map frame lines up. -->
+
+    <arg name="open_rviz"          default="true"/>
+    <arg name="use_static_map"     default="true"/>
+    <arg name="map_file"           default="$(find hakuroukun_boustrophedon_with_cones)/maps/warehouse_map.yaml"/>
+    <arg name="auto_initial_pose"  default="true"/>
+    <arg name="init_x"             default="0.0"/>
+    <arg name="init_y"             default="0.0"/>
+    <arg name="init_yaw"           default="0.0"/>
 
     <!-- Load planner + follower + replanner params -->
-    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/boustrophedon_config.yaml" command="load" />
-    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/path_follower_config.yaml" command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/boustrophedon_config.yaml"    command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/path_follower_config.yaml"   command="load" />
     <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/local_replanner_config.yaml" command="load" />
 
     <!-- Map Server: publishes /map (OccupancyGrid, latched) -->
@@ -14,19 +39,32 @@
         <node pkg="map_server" type="map_server" name="map_server" args="$(arg map_file)" />
     </group>
 
-    <!-- AMCL: publishes corrected map->odom, replacing the old static identity transform.
-         Needs: /scan_multi, /map, and odom->base_link TF (provided above). -->
-    <node pkg="amcl" type="amcl" name="amcl" output="screen" required="true">
-        <rosparam command="load"
-                  file="$(find hakuroukun_boustrophedon_with_cones)/config/amcl_params.yaml"/>
-        <remap from="scan" to="/scan_multi"/>
+    <!-- map -> odom identity (no AMCL). If the Gazebo spawn pose is nonzero,
+         pass matching init_x/init_y/init_yaw so the robot appears at that
+         pose in the map frame. Args: x y z yaw pitch roll parent child. -->
+    <node pkg="tf2_ros" type="static_transform_publisher"
+          name="map_to_odom_static"
+          args="$(arg init_x) $(arg init_y) 0 $(arg init_yaw) 0 0 map odom"/>
+
+    <!-- Auto-release the /map_odom_calibrator/initialized gate that
+         path_follower / local_replanner / offline_coverage_planner wait on.
+         Same mechanism as offline_path_planning_df_sim.launch — no need
+         to click "2D Pose Estimate" in RViz. -->
+    <node if="$(arg auto_initial_pose)"
+          pkg="hakuroukun_boustrophedon_with_cones"
+          type="publish_initial_pose.py"
+          name="publish_map_odom_calibrated"
+          output="screen">
+        <param name="delay" value="2.0"/>
     </node>
 
     <!-- Offline Boustrophedon Planner (publishes /planned_path, latched) -->
     <node pkg="hakuroukun_boustrophedon_with_cones"
           type="offline_coverage_planner.py"
           name="offline_coverage_planner"
-          output="screen" />
+          output="screen">
+        <param name="skip_init_gate" value="true"/>
+    </node>
 
     <!-- Online obstacle-avoidance layer: subscribes /planned_path + /scan_multi,
          publishes /desired_path with detours spliced in around persistent
@@ -42,6 +80,7 @@
           name="path_follower"
           output="screen">
         <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+        <param name="skip_init_gate" value="true"/>
     </node>
 
     <!-- RViz -->

@@ -1,0 +1,51 @@
+{
+  "bag_file": "warehouse_sim_20260827_073532.bag",
+  "bag_path": "/home/systemlab/hakuroukun-zemi/src/hakuroukun_boustrophedon_with_cones/scripts/evaluation/warehouse_sim_20260827_073532.bag",
+  "evaluated_at": "2026-08-27T17:07:46",
+  "params": {
+    "cleaning_width_m": 1.0,
+    "stall_threshold_mps": 0.02,
+    "stall_min_duration_s": 3.0
+  },
+  "run": {
+    "t_start_epoch": 1697.754,
+    "t_end_epoch": 2860.773000001,
+    "duration_s": 1163.0190000010002,
+    "duration_min": 19.38365000001667,
+    "path_length_m": 323.55421989755666,
+    "mean_speed_when_moving_mps": 0.2921359099333092,
+    "fraction_time_moving_pct": 98.62921268510956,
+    "n_odom_samples": 112637,
+    "planned_source": "/planned_path",
+    "n_planned_points": 1511
+  },
+  "coverage": {
+    "coverage_pct": 65.1005229049644,
+    "coverage_pct_raw": 44.47410299224697,
+    "cleaned_area_m2": 283.66250845380137,
+    "total_valid_area_m2": 435.73,
+    "total_valid_area_m2_raw": 637.8150190083684,
+    "valid_area_source": "bcd_inflated",
+    "restricted_violations": 0,
+    "restricted_violations_pct": 0.0,
+    "bcd_valid_area_m2": 435.73
+  },
+  "trajectory_error": {
+    "savg_m": 0.03879501120434657,
+    "smax_m": 0.8439296178643287,
+    "rms_m": 0.10666076943901989,
+    "n_planned_over_1m_off": 0,
+    "pct_planned_over_1m_off": 0.0
+  },
+  "stalls": {
+    "count": 0,
+    "total_stall_time_s": 0.0,
+    "pct_of_run_stalled": 0.0
+  },
+  "gear": {
+    "n_samples": 0
+  },
+  "gps": {
+    "n_samples": 0
+  }
+}

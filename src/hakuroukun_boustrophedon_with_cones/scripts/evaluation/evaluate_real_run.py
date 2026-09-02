@@ -152,7 +152,13 @@ def extract_bag(bag_path: Path, odom_topic: str = '/hakuroukun_pose/rear_wheel_o
                 for i, v in enumerate(arr):
                     row[f'g{i}'] = int(v)
                 data['gear'].append(row)
-            elif topic == '/tf':
+            elif topic in ('/tf', '/tf_static'):
+                # /tf_static carries transforms broadcast once by
+                # static_transform_publisher (e.g. map->odom in the
+                # warehouse sim launch). Real-robot D-F runs push map->odom
+                # dynamically on /tf via map_odom_calibrator.py, so it
+                # naturally arrived without this. Reading both here makes
+                # this script work for both setups.
                 for tr in msg.transforms:
                     parent = tr.header.frame_id
                     child = tr.child_frame_id

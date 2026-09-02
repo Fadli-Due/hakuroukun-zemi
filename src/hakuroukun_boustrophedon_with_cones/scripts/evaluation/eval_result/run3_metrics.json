@@ -1,0 +1,51 @@
+{
+  "bag_file": "run3.bag",
+  "bag_path": "/home/systemlab/hakuroukun-zemi/src/hakuroukun_boustrophedon_with_cones/scripts/evaluation/eval_result/run3.bag",
+  "evaluated_at": "2026-08-09T13:28:22",
+  "params": {
+    "cleaning_width_m": 1.0,
+    "stall_threshold_mps": 0.02,
+    "stall_min_duration_s": 3.0
+  },
+  "run": {
+    "t_start_epoch": 1784533775.916739,
+    "t_end_epoch": 1784535679.56351,
+    "duration_s": 1903.646770954132,
+    "duration_min": 31.72744618256887,
+    "path_length_m": 294.1649972148508,
+    "mean_speed_when_moving_mps": 0.3850899998821401,
+    "fraction_time_moving_pct": 40.1743264659271,
+    "n_odom_samples": 18931,
+    "planned_source": "/planned_path",
+    "n_planned_points": 1092
+  },
+  "coverage": {
+    "coverage_pct": 77.20393843473639,
+    "coverage_pct_raw": 58.57199536845855,
+    "cleaned_area_m2": 180.84250538952654,
+    "total_valid_area_m2": 234.24,
+    "total_valid_area_m2_raw": 308.7525092015416,
+    "valid_area_source": "bcd_inflated",
+    "restricted_violations": 950,
+    "restricted_violations_pct": 5.018224076910887,
+    "bcd_valid_area_m2": 234.24
+  },
+  "trajectory_error": {
+    "savg_m": 0.3812619880660471,
+    "smax_m": 1.3467390467868385,
+    "rms_m": 0.47393665211684155,
+    "n_planned_over_1m_off": 43,
+    "pct_planned_over_1m_off": 3.937728937728938
+  },
+  "stalls": {
+    "count": 23,
+    "total_stall_time_s": 355.1001491546631,
+    "pct_of_run_stalled": 18.653678538097818
+  },
+  "gear": {
+    "n_samples": 0
+  },
+  "gps": {
+    "n_samples": 0
+  }
+}

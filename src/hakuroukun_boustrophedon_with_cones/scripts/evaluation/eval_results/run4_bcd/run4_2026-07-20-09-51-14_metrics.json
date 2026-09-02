@@ -1,0 +1,68 @@
+{
+  "bag_file": "run4_2026-07-20-09-51-14.bag",
+  "bag_path": "/home/systemlab/hakuroukun-zemi/run4_2026-07-20-09-51-14.bag",
+  "evaluated_at": "2026-08-02T14:59:59",
+  "params": {
+    "cleaning_width_m": 1.0,
+    "stall_threshold_mps": 0.02,
+    "stall_min_duration_s": 3.0
+  },
+  "run": {
+    "t_start_epoch": 1784541074.6148047,
+    "t_end_epoch": 1784542907.0379012,
+    "duration_s": 1832.4230964183807,
+    "duration_min": 30.540384940306346,
+    "path_length_m": 281.0955063311837,
+    "mean_speed_when_moving_mps": 0.3779942051198096,
+    "fraction_time_moving_pct": 41.70277418265714,
+    "n_odom_samples": 17772,
+    "planned_source": "/planned_path",
+    "n_planned_points": 1085
+  },
+  "coverage": {
+    "coverage_pct": 73.73740827678094,
+    "coverage_pct_raw": 55.94205714933482,
+    "cleaned_area_m2": 172.72250514753168,
+    "total_valid_area_m2": 234.24,
+    "total_valid_area_m2_raw": 308.7525092015416,
+    "valid_area_source": "bcd_inflated",
+    "restricted_violations": 1059,
+    "restricted_violations_pct": 5.958811613774476,
+    "bcd_valid_area_m2": 234.24
+  },
+  "trajectory_error": {
+    "savg_m": 0.3773839204000853,
+    "smax_m": 1.3045527905488656,
+    "rms_m": 0.4551524528561431,
+    "n_planned_over_1m_off": 28,
+    "pct_planned_over_1m_off": 2.5806451612903225
+  },
+  "stalls": {
+    "count": 23,
+    "total_stall_time_s": 276.6099154949188,
+    "pct_of_run_stalled": 15.095308285274033
+  },
+  "gear": {
+    "n_samples": 16800,
+    "mismatch_count": 391,
+    "mismatch_pct": 2.3273809523809526,
+    "n_cmd_rev": 408,
+    "n_act_rev": 67,
+    "n_rev_rejected": 366,
+    "rev_rejection_pct": 89.70588235294117
+  },
+  "gps": {
+    "n_samples": 1832,
+    "cov_xx_min": 0.00012995999999999998,
+    "cov_xx_median": 0.00016900000000000004,
+    "cov_xx_max": 0.00044100000000000004,
+    "cov_xx_mean": 0.00017783006550218343,
+    "max_dt_s": 1.0439493656158447,
+    "n_gaps_over_2s": 0,
+    "n_cov_over_1e-2": 0,
+    "n_cov_over_1": 0,
+    "status_hist": {
+      "2": 1832
+    }
+  }
+}
