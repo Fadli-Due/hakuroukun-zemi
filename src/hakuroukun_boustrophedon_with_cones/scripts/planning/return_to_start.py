@@ -13,7 +13,11 @@ Workflow
 3. Tracks the robot's pose from /hakuroukun_pose/rear_wheel_odometry.
 4. Waits for /path_follower/done (latched Bool published once when the
    path_follower has finished the coverage path).
-5. On True, runs A* from the robot's current pose to baseline[0].
+5. On True, runs A* from the robot's current pose to baseline[0]. If that
+   fails because the goal cell is inside the wall-inflation buffer
+   (common with SLAM-derived maps where the home pose sits very close
+   to a wall), snap the goal outward to the nearest free cell within
+   `~max_snap` metres and retry once.
 6. Publishes the A* result on /return_path (nav_msgs/Path, latched).
    local_replanner subscribes to that topic, splices the return path
    onto the tail of current_path, and republishes /desired_path so the
@@ -23,9 +27,9 @@ Workflow
 
 Soft-failure behaviour
 ----------------------
-If A* fails (no path found, start cell occupied, etc.), the node logs a
-warning and exits without publishing /return_path. Coverage is already
-complete so the robot just stops — no crash, no undefined behaviour.
+If A* fails even after snapping, the node logs a warning and exits
+without publishing /return_path. Coverage is already complete so the
+robot just stops — no crash, no undefined behaviour.
 
 Notes
 -----
@@ -78,6 +82,11 @@ class ReturnToStart:
             "~astar_max_expansions", 200000)
         # A* connectivity (4 or 8). 8 gives smoother diagonals.
         self.astar_connectivity = rospy.get_param("~astar_connectivity", 8)
+        # If the home cell is inside the inflation buffer (common with
+        # SLAM-derived maps: fuzzy wall fringes eat into free space near
+        # where the BCD lanes start), snap the goal to the nearest free
+        # cell within this radius (m) and retry A*. Set to 0.0 to disable.
+        self.max_snap = rospy.get_param("~max_snap", 2.0)
 
         # ---- state --------------------------------------------------------
         self.lock = threading.Lock()
@@ -102,8 +111,10 @@ class ReturnToStart:
                          Odometry, self.odom_cb)
         rospy.Subscriber('/path_follower/done', Bool, self.done_cb)
 
-        rospy.loginfo("[return_to_start] ready. robot_radius=%.2f densify=%.2f",
-                      self.robot_radius, self.densify_step)
+        rospy.loginfo(
+            "[return_to_start] ready. robot_radius=%.2f densify=%.2f "
+            "max_snap=%.2f",
+            self.robot_radius, self.densify_step, self.max_snap)
 
     # ------------------------------------------------------------------ I/O
     def baseline_cb(self, msg):
@@ -175,8 +186,71 @@ class ReturnToStart:
         self._compute_and_publish_return()
 
     # -------------------------------------------------------------- planning
+    def _find_nearest_free(self, gx, gy, max_snap_m):
+        """Ring-search outward from world coord (gx, gy) for the nearest
+        cell that is free in the inflated static grid.
+
+        Returns (new_gx, new_gy, snap_m) — the world coord of the free
+        cell center and its Euclidean distance from the original goal —
+        or None if no free cell exists within max_snap_m.
+        """
+        with self.lock:
+            grid = self.static_grid
+        res = grid.resolution
+        w, h = grid.width, grid.height
+        ox, oy = grid.origin_x, grid.origin_y
+        data = grid.data  # flat list; 0 = free, 100 = occupied
+
+        # Convert the goal to grid cell indices.
+        gc = int((gx - ox) / res)
+        gr = int((gy - oy) / res)
+
+        max_ring = int(max_snap_m / res) + 1
+
+        for ring in range(max_ring + 1):
+            # Enumerate cells exactly `ring` steps from (gc, gr) in
+            # Chebyshev distance. For ring=0 that's just the center; for
+            # ring>=1 it's the square perimeter at that offset.
+            if ring == 0:
+                candidates = [(gc, gr)]
+            else:
+                candidates = []
+                # Top and bottom rows of the ring.
+                for dc in range(-ring, ring + 1):
+                    candidates.append((gc + dc, gr - ring))
+                    candidates.append((gc + dc, gr + ring))
+                # Left and right columns, excluding the corners already covered.
+                for dr in range(-ring + 1, ring):
+                    candidates.append((gc - ring, gr + dr))
+                    candidates.append((gc + ring, gr + dr))
+
+            best = None
+            best_d = float('inf')
+            for c, r in candidates:
+                if c < 0 or c >= w or r < 0 or r >= h:
+                    continue
+                idx = r * w + c
+                if data[idx] != 0:
+                    continue
+                # Use the Euclidean distance to the *cell center* so the
+                # closest one on a ring wins in case several are free.
+                nx = ox + (c + 0.5) * res
+                ny = oy + (r + 0.5) * res
+                d = ((nx - gx) ** 2 + (ny - gy) ** 2) ** 0.5
+                if d < best_d:
+                    best_d = d
+                    best = (nx, ny, d)
+            if best is not None and best[2] <= max_snap_m:
+                return best
+
+        return None
+
     def _compute_and_publish_return(self):
-        """Run A* from robot pose to baseline[0], densify, publish."""
+        """Run A* from robot pose to baseline[0], densify, publish.
+
+        If the direct goal is blocked in the inflated grid, snap outward
+        to the nearest free cell within self.max_snap and retry once.
+        """
         with self.lock:
             sx, sy = self.robot_xy
             gx, gy = self.baseline_path[0]
@@ -191,11 +265,35 @@ class ReturnToStart:
                             max_expansions=self.astar_max_expansions)
 
         if not result or result == "GOAL_OCCUPIED":
+            # Home cell is blocked in the inflated grid. Try snapping.
+            if self.max_snap > 0.0:
+                snap = self._find_nearest_free(gx, gy, self.max_snap)
+            else:
+                snap = None
+            if snap is None:
+                rospy.logwarn(
+                    "[return_to_start] A* failed (start=(%.2f, %.2f), "
+                    "goal=(%.2f, %.2f)) and no free cell within %.2fm of "
+                    "home. Robot will stay at coverage end pose.",
+                    sx, sy, gx, gy, self.max_snap)
+                return
+
+            new_gx, new_gy, snap_m = snap
             rospy.logwarn(
-                "[return_to_start] A* failed (start=(%.2f, %.2f), "
-                "goal=(%.2f, %.2f)). Robot will stay at coverage end pose.",
-                sx, sy, gx, gy)
-            return
+                "[return_to_start] home (%.2f, %.2f) blocked in inflated "
+                "grid; snapped goal to nearest free cell (%.2f, %.2f) at "
+                "%.2fm and retrying A*.",
+                gx, gy, new_gx, new_gy, snap_m)
+
+            result = astar_plan(grid, sx, sy, new_gx, new_gy,
+                                connectivity=self.astar_connectivity,
+                                max_expansions=self.astar_max_expansions)
+
+            if not result or result == "GOAL_OCCUPIED":
+                rospy.logwarn(
+                    "[return_to_start] A* still failed after snapping. "
+                    "Robot will stay at coverage end pose.")
+                return
 
         # Densify so point spacing matches the rest of current_path
         # (path_follower's lookahead behaviour is tuned for ~0.20 m spacing).
