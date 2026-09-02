@@ -11,7 +11,10 @@ pure_pursuit_hakuroukun:
   # failed to produce a new path (static wall / map boundary).
   # 40 steps x 0.20m = 8m skip — clears a stuck corner turn.
   skip_on_timeout: 15
-  obstacle_stop_range: 0.90
+  obstacle_stop_range: 0.70
+  hold_corridor_half_width: 0.55   # NEW — half-width of front collision corridor, m
+  hold_corridor_max_range:  3.0    # NEW — ignore returns beyond this for HOLD, m
+  hold_front_offset:        0.0 
 
 reverse:
   enable: true
