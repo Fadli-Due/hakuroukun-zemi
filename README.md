@@ -24,7 +24,7 @@ src/
 ├── hakuroukun_navigation/                ← sdv_msgs, trajectory_generation
 ├── hakuroukun_sensor/                    ← RPLIDAR, TSND151 IMU, u-blox F9P GPS drivers
 ├── hakuroukun_steering_controller/       ← ros_control plugin
-├── DF_Mapping.md                         ← D-F outdoor mapping procedure (gmapping)
+├── DF_Mapping.md                         ← SUPERSEDED — old gmapping attempt; D-F map is now drawn (see D-F field mapping)
 ├── paint_polygons.py                     ← interactive PGM polygon painter (restricted zones)
 ├── sync_to_docker.sh                     ← host↔container inotify sync helper
 ├── frames.pdf                            ← TF tree snapshot
@@ -260,7 +260,7 @@ hakuroukun_boustrophedon_with_cones/
 │   ├── local_replanner_config.yaml      ← persistence=7s, window=15m, lookahead=7m, obstacle_inflate=1.2m
 │   ├── costmap_params.yaml
 │   ├── gmapping_params.yaml             ← sim mapping (mapping_warehouse.launch)
-│   ├── gmapping_params_real.yaml        ← real D-F mapping (df_mapping_real.launch)
+│   ├── gmapping_params_real.yaml        ← SUPERSEDED: real D-F gmapping (map is now drawn, not SLAM)
 │   └── gps_rotation_calibration_sim.yaml ← sim override (both values 0.0; real value lives in hakuroukun_pose/)
 ├── launch/
 │   ├── bringup_hakuroukun_conemap_sim.launch     ← Gazebo + robot (conemap world)
@@ -273,7 +273,7 @@ hakuroukun_boustrophedon_with_cones/
 │   ├── offline_path_planning_df.launch           ← Planner + replanner + follower (D-F sim)
 │   ├── offline_path_planning_df_outline.launch   ← D-F outline-map variant
 │   ├── offline_path_planning_real.launch         ← Planner + replanner + follower + return-to-start (real robot, no AMCL)
-│   ├── df_mapping_real.launch                    ← gmapping the D-F outdoor field (see DF_Mapping.md)
+│   ├── df_mapping_real.launch                    ← SUPERSEDED: gmapping the D-F field (abandoned; map is now drawn)
 │   ├── df_mapping.launch / df_mapping_minimal.launch
 │   ├── mapping_warehouse.launch                  ← gmapping (sim, only needed to rebuild warehouse map)
 │   ├── slam_gmapping.launch
@@ -284,9 +284,11 @@ hakuroukun_boustrophedon_with_cones/
 ├── maps/
 │   ├── conemap_planning.{pgm,yaml}      ← main map used for simulation thesis experiments
 │   ├── conemap_walls_cones.{pgm,yaml}
-│   ├── df_area_planning.{pgm,yaml}      ← real-world thesis map (GPS-derived, 308.75 m² valid)
-│   ├── df_area_outline.{pgm,yaml}       ← D-F outline-only variant
-│   ├── df_area_outline_painted.{pgm,yaml}
+│   ├── df_area_outline_rotated.{pgm,yaml} ← real-world thesis map (drawn from GPS corners, rotated 8.3°; 308.75 m² valid)
+│   ├── df_area_outline_painted.{pgm,yaml} ← outline + painted restricted zones (input to rotate_map.py)
+│   ├── df_area_outline.{pgm,yaml}       ← bare drawn outline (before painting/rotation)
+│   ├── df_area_planning.{pgm,yaml}      ← predecessor real map (pre-rotation naming)
+│   ├── rotate_map.py                    ← rotates the painted map 8.3° into the field-aligned frame
 │   ├── warehouse_map.{pgm,yaml}
 │   └── saved_map.{pgm,yaml}
 ├── scripts/
@@ -473,30 +475,50 @@ rosrun hakuroukun_boustrophedon_with_cones test_obstacle_spawner.py \
 
 ### D-F outdoor field mapping
 
-The real-world thesis experiments used a GPS-derived static map of the D-F
-outdoor area at TUT, not the painted conemap. Build this map only when the
-GPS unit has been remounted or the field layout has changed — the existing
-`maps/df_area_planning.{pgm,yaml}` is what the thesis Run 1 and Run 2 both
-used.
+The real-world thesis map is **drawn offline from surveyed GPS corners**, not
+SLAM-mapped. gmapping was tried and abandoned — the D-F field is open and flat,
+so without wall/fence scan anchors the scan matching diverges (`Likelihood ≈
+-166` in the log). The old gmapping procedure in [`DF_Mapping.md`](./DF_Mapping.md)
+is kept for historical reference only; **do not follow it.**
 
-The full mapping procedure (prerequisites, 5-terminal layout, driving
-pattern, save/verify steps, gmapping troubleshooting, offline re-mapping
-from a rosbag) lives in [`DF_Mapping.md`](./DF_Mapping.md) at the
-workspace root. Two things worth reading before you start:
+Rebuild the map only when the field layout changes or the GPS calibration shifts
+enough to misalign it. The current map is `maps/df_area_outline_rotated.{pgm,yaml}`
+— what thesis Run 1 and Run 2 used.
 
-- **gmapping fails in open field.** Without wall/fence scan anchors,
-  scan matching diverges (`Likelihood ≈ -166` in the log). Start mapping
-  positioned near the perimeter fence, and drive so the LiDAR sees a
-  wall for at least the first ~20 s before venturing into open ground.
-- **Always record the whole session with `rosbag record -a`.** If the
-  live map turns out badly, you can re-run gmapping offline from the
-  bag with tuned parameters — no second field trip needed.
+**Pipeline (three offline steps, no SLAM):**
 
-If you need to update the restricted-zone polygons on an existing PGM
-without re-mapping, use `paint_polygons.py` at the workspace root
-(interactive matplotlib polygon painter, outputs a P5 PGM with only
-`{0, 205, 254}` pixel values). Copy the existing YAML alongside and
-just change its `image:` field.
+1. **Survey the boundary corners.** Drive the robot to each boundary corner and,
+   with it stopped, read its map-frame `(x, y)` — the pose node converts GPS
+   `/fix` into local XY and publishes it on `/hakuroukun_pose/rear_wheel_odometry`:
+   ```bash
+   rostopic echo -n1 /hakuroukun_pose/rear_wheel_odometry/pose/pose/position
+   ```
+   Make sure `/fix status` is **2 (RTK fixed)** at each corner, and that the GPS
+   rotation calibration is current *first* (see the `gps_rotation_calibrator.py`
+   section) — this XY comes from that conversion. Walk the perimeter in order.
+
+2. **Draw the outline** with `map_draw.py` (package root). Put the surveyed
+   corners in its `corners` list; it fills the interior free, draws the boundary
+   as wall, leaves the outside unknown, and writes the `.pgm` + `.yaml`
+   (0.05 m/px, 2 m margin, origin auto-computed from the corner bounding box).
+   ⚠️ Edit the hardcoded output paths for your machine first.
+
+3. **Paint restricted zones, then rotate.** Paint the cone / keep-out polygons
+   onto the outline with `paint_polygons.py` (interactive matplotlib painter →
+   P5 PGM with only `{0, 205, 254}` pixels), saving as `df_area_outline_painted.*`.
+   Then run `maps/rotate_map.py`, which rotates the painted map **8.3° CCW** about
+   its centre so the field's X/Y axes come out straight (aligned with reality) and
+   recomputes the YAML origin + yaw to preserve world coordinates →
+   `df_area_outline_rotated.{pgm,yaml}`.
+
+The **8.3°** is a hand-tuned constant matched to the current GPS calibration; if
+you re-survey or the GPS rotation changes, load the map in RViz and nudge
+`alpha_deg` in `rotate_map.py` until the outline overlays the driven GPS track.
+
+`offline_path_planning_real.launch` already defaults to
+`df_area_outline_rotated.yaml`, so once it's in `maps/` the real run picks it up
+with no extra flags. To just tweak the restricted zones on an existing map,
+re-paint with `paint_polygons.py` and re-run `rotate_map.py`.
 
 ### Real robot
 
@@ -517,18 +539,23 @@ Key differences from simulation:
   motion commands.
 - `odom → base_link` is published by `odom_tf_broadcaster.py` from
   `/hakuroukun_pose/rear_wheel_odometry`.
-- Uses the **GPS-derived `df_area_planning.yaml`** as the planning map (the
-  default in `offline_path_planning_real.launch`), not `conemap_planning.yaml`.
-  The thesis Run 1 (58.57% coverage) and Run 2 (55.94%) both used this map.
-- **No live cone detection**. Cones are pre-painted
-  into the planning map and physically placed at matching positions on the
-  ground before the run.
+- Uses the **corner-derived `df_area_outline_rotated.yaml`** as the planning map
+  (the default in `offline_path_planning_real.launch`), not `conemap_planning.yaml`.
+  This is the drawn outline rotated 8.3° to axis-align with the field (see
+  *D-F outdoor field mapping*). Thesis Run 1 (58.57% coverage) and Run 2 (55.94%)
+  both used it.
+- **Cones are painted into the planning map** and physically placed at matching
+  positions on the ground before the run; the planner treats them as restricted
+  zones it must not cross. Live LiDAR detection of the physical cones is a
+  desired addition but is **not** what the planner relies on — and in the field
+  runs, reflex-HOLD detection against low-profile cones was inconsistent (see
+  *Real-world results*).
 
 #### 1. Set up experiment environment
 
 Place the physical cones on the ground at positions matching the polygons
-painted into `df_area_planning.pgm`. The cones define restricted zones the
-planner must not cross.
+painted into `df_area_outline_rotated.pgm`. The cones define restricted zones
+the planner must not cross.
 
 - 10 cones total.
 - Cone coordinates can be re-extracted from the planning map with
@@ -802,7 +829,7 @@ rosrun hakuroukun_boustrophedon_with_cones cleaning_simulator.py
 ```bash
 roslaunch hakuroukun_boustrophedon_with_cones offline_path_planning_real.launch
 ```
-This defaults to `map_file:=df_area_planning.yaml`. Pass
+This defaults to `map_file:=df_area_outline_rotated.yaml`. Pass
 `map_file:=<other>.yaml` on the command line only if you deliberately
 want a different map — the thesis results are all on this default.
 
@@ -1077,8 +1104,9 @@ real-world runs.
 
 ### Real-world results (thesis)
 
-Two field runs on 2026-07-20 at the D-F outdoor field area (TUT campus),
-both on the GPS-derived `df_area_planning.yaml` map (308.75 m² valid area).
+Two field runs on 2026-07-20 at the D-F outdoor field area (TUT campus), both
+on the corner-derived `df_area_outline_rotated.yaml` map (the drawn outline
+rotated 8.3° to axis-align with the field; 308.75 m² valid area).
 Both runs were fully evaluated post-hoc via `evaluate_real_run.py` from the
 same `bcd_automode.ino` autonomous run — no manual seeding beyond the
 2D Pose Estimate click.
