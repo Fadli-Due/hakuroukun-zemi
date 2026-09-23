@@ -1,0 +1,26 @@
+Bag:               run4_2026-07-20-09-51-14.bag
+Duration:          1832.4 s   (30.54 min)
+Path length:       281.10 m
+Mean speed moving: 0.378 m/s   (41.7% of run in motion)
+Planned source:    /planned_path  (1085 pts)
+
+Coverage:          55.94 %   (cleaned 172.72 / valid 308.75 m²)
+Restricted-cell hits: 1059 samples (5.96% of trajectory)
+
+Trajectory error (nearest-neighbor planned -> actual):
+  Savg = 0.3774 m   Smax = 1.3046 m   RMS = 0.4552 m
+  Planned pts > 1 m off: 28 (2.6%)
+
+Stalls (< 0.02 m/s for >= 3.0 s):
+  count = 23  total = 276.6 s (15.1% of run)
+
+Gear (commanded vs actual):
+  Overall mismatch:  391/16800 (2.33%)
+  Reverse commanded: 408   actual reverse engaged: 67
+  Reverse rejected:  366 (89.7% of reverse commands)
+
+GPS quality (1832 fixes):
+  cov_xx min=1.30e-04  median=1.69e-04  max=4.41e-04
+  fixes with cov > 0.01 m²: 0   cov > 1 m²: 0
+  max gap between fixes: 1.04 s   gaps > 2 s: 0
+  status hist: {2: 1832}

@@ -1,0 +1,106 @@
+<launch>
+    <!-- Warehouse simulation variant, cloned from
+         offline_path_planning_df_sim.launch. Uses the same "no AMCL,
+         ground-truth odometry, auto-released map->odom gate" pattern that
+         works for the D-F sim. The only differences vs. the D-F sim are:
+           * map_file points at the warehouse map
+           * return_to_start.py is not included (matches the previous
+             warehouse launch behavior)
+
+         Design notes (inherited from D-F sim):
+           * AMCL is intentionally skipped. Localization comes from
+             /ground_truth/odometry (Gazebo p3d plugin), and map->odom is
+             a static identity transform so planner and map_server share
+             a common frame.
+           * odom -> base_link is published by odom_tf_broadcaster.py off
+             /ground_truth/odometry (NOT off Gazebo's built-in TF, so all
+             downstream nodes see a consistent pose source).
+           * If you spawn the robot at a nonzero pose in bringup, pass the
+             same values via init_x/init_y/init_yaw here so the map frame
+             lines up.
+           * Layer 1 Reflex HOLD works in this sim because the warehouse
+             world has real walls that /scan_multi sees. Layer 2
+             persistence-gated A* also works normally.
+
+         Prerequisites: bringup_hakuroukun_warehouse_sim.launch must be
+         running first (Gazebo + laser filters + /scan_multi + pose node). -->
+
+    <arg name="open_rviz"          default="true"/>
+    <arg name="map_file"           default="$(find hakuroukun_boustrophedon_with_cones)/maps/warehouse_map.yaml"/>
+    <arg name="auto_initial_pose"  default="true"/>
+    <arg name="init_x"             default="0.0"/>
+    <arg name="init_y"             default="0.0"/>
+    <arg name="init_yaw"           default="0.0"/>
+
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/boustrophedon_config.yaml"    command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/path_follower_config.yaml"   command="load" />
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/local_replanner_config.yaml" command="load" />
+
+    <!-- Static warehouse map. -->
+    <node pkg="map_server" type="map_server" name="map_server" args="$(arg map_file)" />
+
+    <!-- map -> odom identity (no AMCL). If the Gazebo spawn pose is nonzero,
+         pass matching init_x/init_y/init_yaw so the robot appears at that
+         pose in the map frame. Args: x y z yaw pitch roll parent child. -->
+    <node pkg="tf2_ros" type="static_transform_publisher"
+          name="map_to_odom_static"
+          args="$(arg init_x) $(arg init_y) 0 $(arg init_yaw) 0 0 map odom"/>
+
+    <!-- Broadcasts odom -> base_link from Gazebo ground truth. -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="odom_tf_broadcaster.py"
+          name="odom_tf_broadcaster"
+          output="screen">
+        <param name="odom_frame" value="odom"/>
+        <param name="base_frame" value="base_link"/>
+        <param name="odom_topic" value="/ground_truth/odometry"/>
+    </node>
+
+    <!-- Same init gate signal as the existing sim launches, so downstream
+         nodes that wait on /map_odom_calibrator/initialized still start. -->
+    <node if="$(arg auto_initial_pose)"
+          pkg="hakuroukun_boustrophedon_with_cones"
+          type="publish_initial_pose.py"
+          name="publish_map_odom_calibrated"
+          output="screen">
+        <param name="delay" value="2.0"/>
+    </node>
+
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="offline_coverage_planner.py"
+          name="offline_coverage_planner"
+          output="screen">
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+        <param name="skip_init_gate" value="true"/>
+    </node>
+
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="local_replanner.py"
+          name="local_replanner"
+          output="screen">
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+    </node>
+
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="path_follower.py"
+          name="path_follower"
+          output="screen">
+        <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+        <param name="skip_init_gate" value="true"/>
+    </node>
+
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="return_to_start.py"
+          name="return_to_start"
+          output="screen">
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+    </node>
+
+    <group if="$(arg open_rviz)">
+        <node pkg="rviz" type="rviz" name="rviz" required="true"
+              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/boustrophedon_with_cones.rviz">
+            <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+        </node>
+    </group>
+</launch>

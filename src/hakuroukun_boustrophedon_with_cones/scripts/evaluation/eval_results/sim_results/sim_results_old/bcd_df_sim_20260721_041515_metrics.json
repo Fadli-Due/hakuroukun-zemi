@@ -1,0 +1,51 @@
+{
+  "bag_file": "bcd_df_sim_20260721_041515.bag",
+  "bag_path": "/home/systemlab/hakuroukun-zemi/src/hakuroukun_boustrophedon_with_cones/scripts/evaluation/eval_results/sim_results/bcd_df_sim_20260721_041515.bag",
+  "evaluated_at": "2026-07-21T13:41:58",
+  "params": {
+    "cleaning_width_m": 1.0,
+    "stall_threshold_mps": 0.02,
+    "stall_min_duration_s": 3.0
+  },
+  "run": {
+    "t_start_epoch": 3172.05,
+    "t_end_epoch": 4536.508000001,
+    "duration_s": 1364.458000001,
+    "duration_min": 22.740966666683335,
+    "path_length_m": 321.0320631284746,
+    "mean_speed_when_moving_mps": 0.27151908080269477,
+    "fraction_time_moving_pct": 93.23512293341304,
+    "n_odom_samples": 127143,
+    "planned_source": "/desired_path",
+    "n_planned_points": 2018
+  },
+  "coverage": {
+    "coverage_pct": 79.14408757639389,
+    "coverage_pct_raw": 59.576060411672685,
+    "cleaned_area_m2": 264.68750788830226,
+    "total_valid_area_m2": 334.4375,
+    "total_valid_area_m2_raw": 444.2850132407249,
+    "valid_area_source": "bcd_inflated",
+    "restricted_violations": 0,
+    "restricted_violations_pct": 0.0,
+    "bcd_valid_area_m2": 334.4375
+  },
+  "trajectory_error": {
+    "savg_m": 0.24866768877892698,
+    "smax_m": 0.8558587918187865,
+    "rms_m": 0.30823660734876535,
+    "n_planned_over_1m_off": 0,
+    "pct_planned_over_1m_off": 0.0
+  },
+  "stalls": {
+    "count": 6,
+    "total_stall_time_s": 79.89999999999873,
+    "pct_of_run_stalled": 5.855805015613537
+  },
+  "gear": {
+    "n_samples": 0
+  },
+  "gps": {
+    "n_samples": 0
+  }
+}

@@ -1,0 +1,16 @@
+Bag:               warehouse_sim_20260827_073532.bag
+Duration:          1163.0 s   (19.38 min)
+Path length:       323.55 m
+Mean speed moving: 0.292 m/s   (98.6% of run in motion)
+Planned source:    /planned_path  (1511 pts)
+
+Coverage:          65.10 %   (cleaned 283.66 / valid 435.73 m², src=bcd_inflated)
+  (raw white-area denominator: 44.47 % over 637.82 m²)
+Restricted-cell hits: 0 samples (0.00% of trajectory)
+
+Trajectory error (nearest-neighbor planned -> actual):
+  Savg = 0.0388 m   Smax = 0.8439 m   RMS = 0.1067 m
+  Planned pts > 1 m off: 0 (0.0%)
+
+Stalls (< 0.02 m/s for >= 3.0 s):
+  count = 0  total = 0.0 s (0.0% of run)

@@ -1,0 +1,22 @@
+Bag:               sim_run_20260730_073450.bag
+Duration:          1104.1 s   (18.40 min)
+Path length:       222.63 m
+Mean speed moving: 0.282 m/s   (84.1% of run in motion)
+Planned source:    /planned_path  (985 pts)
+
+Coverage:          74.12 %   (cleaned 173.63 / valid 234.24 m², src=bcd_inflated)
+  (raw white-area denominator: 56.24 % over 308.76 m²)
+Restricted-cell hits: 0 samples (0.00% of trajectory)
+
+Trajectory error (nearest-neighbor planned -> actual):
+  Savg = 0.1538 m   Smax = 1.2900 m   RMS = 0.2610 m
+  Planned pts > 1 m off: 8 (0.8%)
+
+Stalls (< 0.02 m/s for >= 3.0 s):
+  count = 12  total = 150.8 s (13.7% of run)
+
+GPS quality (44158 fixes):
+  cov_xx min=1.00e-04  median=1.00e-04  max=1.00e-04
+  fixes with cov > 0.01 m²: 0   cov > 1 m²: 0
+  max gap between fixes: 0.05 s   gaps > 2 s: 0
+  status hist: {0: 44158}

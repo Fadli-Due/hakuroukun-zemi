@@ -3,3 +3,5 @@ src/QuadProgpp/
 __pycache__/
 eagleeye/
 log_data/
+*.bag
+**/eval_results.zip

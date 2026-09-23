@@ -1,0 +1,17 @@
+<launch>
+  <!-- odom -> base_link (live, from hakuroukun_pose_node) -->
+  <node pkg="hakuroukun_boustrophedon_with_cones"
+        type="odom_tf_broadcaster.py"
+        name="odom_tf_broadcaster"
+        output="screen">
+    <param name="odom_frame" value="odom"/>
+    <param name="base_frame" value="base_link"/>
+    <param name="odom_topic" value="/hakuroukun_pose/rear_wheel_odometry"/>
+  </node>
+
+  <!-- RViz -->
+  <node name="rviz"
+        pkg="rviz"
+        type="rviz"
+        args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/straight_line_test.rviz" />
+</launch>

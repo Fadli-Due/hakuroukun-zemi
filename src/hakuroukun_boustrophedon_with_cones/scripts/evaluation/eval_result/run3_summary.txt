@@ -1,0 +1,16 @@
+Bag:               run3.bag
+Duration:          1903.6 s   (31.73 min)
+Path length:       294.16 m
+Mean speed moving: 0.385 m/s   (40.2% of run in motion)
+Planned source:    /planned_path  (1092 pts)
+
+Coverage:          77.20 %   (cleaned 180.84 / valid 234.24 m², src=bcd_inflated)
+  (raw white-area denominator: 58.57 % over 308.75 m²)
+Restricted-cell hits: 950 samples (5.02% of trajectory)
+
+Trajectory error (nearest-neighbor planned -> actual):
+  Savg = 0.3813 m   Smax = 1.3467 m   RMS = 0.4739 m
+  Planned pts > 1 m off: 43 (3.9%)
+
+Stalls (< 0.02 m/s for >= 3.0 s):
+  count = 23  total = 355.1 s (18.7% of run)

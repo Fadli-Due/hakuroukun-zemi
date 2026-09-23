@@ -1,0 +1,45 @@
+<launch>
+    <!-- Flat-ground variant of gazebo_df.launch. No walls, no cone models 
+         just ground plane + sun + the Hakuroukun robot. Use this to sanity
+         check spawn position, planner behavior, and follower motion on a
+         new/updated map without any risk of stale geometry from an older
+         world (e.g. the previous larger df_area.world) interfering. -->
+
+    <arg name="x"   default="0.0"/>
+    <arg name="y"   default="0.0"/>
+    <arg name="yaw" default="0.0"/>
+
+    <arg name="paused"      default="false"/>
+    <arg name="use_sim_time" default="true"/>
+    <arg name="gui"         default="true"/>
+    <arg name="headless"    default="false"/>
+    <arg name="debug"       default="false"/>
+
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <arg name="world_name" value="$(find hakuroukun_boustrophedon_with_cones)/worlds/flat_ground.world"/>
+        <arg name="paused" value="$(arg paused)"/>
+        <arg name="use_sim_time" value="$(arg use_sim_time)"/>
+        <arg name="gui" value="$(arg gui)"/>
+        <arg name="headless" value="$(arg headless)"/>
+        <arg name="debug" value="$(arg debug)"/>
+    </include>
+
+    <!-- Same robot description used everywhere else -->
+    <param name="robot_description"
+           command="$(find xacro)/xacro --inorder $(find hakuroukun_description)/urdf/hakuroukun.urdf.xacro" />
+
+    <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" output="screen">
+        <param name="publish_frequency" value="50.0" />
+    </node>
+
+    <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher" output="screen" />
+
+    <!-- NOTE: matches the spawn_model call pattern gazebo_df.launch already
+         uses verify against that file if node name / args differ in your
+         actual setup, since I don't have gazebo_df.launch's exact contents
+         to confirm this line-for-line. -->
+    <node name="spawn_hakuroukun" pkg="gazebo_ros" type="spawn_model"
+          args="-urdf -param robot_description -model hakuroukun
+                -x $(arg x) -y $(arg y) -z 0.05 -Y $(arg yaw)"
+          output="screen" respawn="false" />
+</launch>

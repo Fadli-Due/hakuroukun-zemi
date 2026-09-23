@@ -1,0 +1,15 @@
+Bag:               df_walled_sim_20260729_072213.bag
+Duration:          1020.2 s   (17.00 min)
+Path length:       218.52 m
+Mean speed moving: 0.290 m/s   (85.6% of run in motion)
+Planned source:    /desired_path  (985 pts)
+
+Coverage:          57.24 %   (cleaned 176.75 / valid 308.76 m², src=raw_free_cells)
+Restricted-cell hits: 0 samples (0.00% of trajectory)
+
+Trajectory error (nearest-neighbor planned -> actual):
+  Savg = 0.1265 m   Smax = 0.8549 m   RMS = 0.1990 m
+  Planned pts > 1 m off: 0 (0.0%)
+
+Stalls (< 0.02 m/s for >= 3.0 s):
+  count = 11  total = 129.5 s (12.7% of run)

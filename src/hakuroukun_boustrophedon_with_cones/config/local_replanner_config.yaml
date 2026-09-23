@@ -15,7 +15,7 @@ local_replanner:
 
   # A cell that has not been hit for this long is forgotten. Should be much
   # smaller than persistence_threshold; ~1s smooths over single-scan dropouts.
-  clear_time: 1.0
+  clear_time: 3.0
 
   # ---- local obstacle window -------------------------------------------------
   # Side length (m) of the obstacle grid window centred on the robot. Keep
@@ -32,7 +32,7 @@ local_replanner:
 
   # After the last blocked path index, rejoin the baseline this many metres
   # further on so the rejoin point has clearance.
-  rejoin_margin_m: 1.5
+  rejoin_margin_m: 3.0
 
   # Inflation applied to detected obstacles when building the A* detour grid (m).
   # Previously 1.2m (larger than robot_radius=1.0m) to account for rear overhang.
@@ -40,7 +40,29 @@ local_replanner:
   # 1.2m inflation made small obstacles look like wall segments, blocking A*.
   # 0.9m gives the robot's 0.81m half-width a small safety margin without
   # over-inflating small objects.
-  obstacle_inflate_m: 0.7
+  obstacle_inflate_m: 1.0
+
+  # ---- blockage detection ---------------------------------------------------
+  # How close the path may pass to a persistent obstacle before that path point
+  # counts as blocked (m). This is the COLLISION threshold — set it to roughly
+  # the robot's half-width. It is deliberately smaller than obstacle_inflate_m,
+  # which is the clearance A* keeps while routing around the obstacle.
+  #
+  # NEW (2026-07-30). Detection previously asked whether a path point fell in a
+  # cell that a laser return had landed on. The LiDAR only stamps the near-facing
+  # SURFACE SHELL of an obstacle — it cannot see the interior — so that shell is
+  # ~1 cell (0.05 m) thick while path points are densify_step (0.20 m) apart.
+  # A path running straight through a 0.30 m cylinder scored 0/11 path points
+  # inside the shell. Distance-to-nearest-cell fixes this. Do NOT set to 0.
+  block_check_radius_m: 0.55
+
+  # Radius (m) of the disc around the A* start cell that is forcibly re-freed
+  # when building the detour grid. Needed because HOLD fires at
+  # obstacle_stop_range (0.90 m) while obstacle_inflate_m is 1.2 m, so the robot
+  # is standing inside its own inflation bubble and A* would abort with
+  # "Start cell is occupied". Static walls are never carved — only dynamic
+  # inflation. Keep this just above (obstacle_inflate_m - obstacle_stop_range).
+  start_clear_radius_m: 0.60
 
   # ---- LiDAR gating ---------------------------------------------------------
   # Drop returns closer than this (m) -- avoids the robot's own footprint.

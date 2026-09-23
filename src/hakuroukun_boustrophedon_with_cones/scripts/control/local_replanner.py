@@ -81,6 +81,27 @@ class LocalReplanner:
         # prevents baseline path points near walls from being falsely blocked when
         # obstacle_inflate_m > robot_radius (would cause "Goal cell occupied" errors).
         self.static_wall_inflate_m = rospy.get_param("robot_radius", 1.0)
+        # FIX (2026-07-30): radius (m) used to decide whether a PATH POINT is
+        # blocked by a dynamic obstacle. Must be > 0: the LiDAR only stamps the
+        # near-facing SURFACE SHELL of an obstacle (the interior is invisible to
+        # it), so that shell is ~1 cell thick while path points are densify_step
+        # (0.20 m = 4 cells) apart. Testing a path point for exact membership in
+        # the shell returns False even when the path runs straight through the
+        # obstacle centre — measured 0/11 hits on a 0.30 m cylinder. We therefore
+        # test DISTANCE to the nearest persistent cell instead. Set to roughly
+        # the robot's half-width: this is the real collision threshold.
+        # Deliberately smaller than obstacle_inflate_m — that value is the
+        # clearance A* keeps while routing, not the collision threshold.
+        self.block_check_radius_m  = rospy.get_param(f"{ns}/block_check_radius_m", 0.55)
+        # FIX (2026-07-30): radius (m) of the disc around the A* start cell that
+        # is forcibly re-freed in the detour grid. When HOLD has already fired,
+        # the robot sits obstacle_stop_range (0.90 m) from the obstacle while
+        # obstacle_inflate_m is 1.2 m — so the start cell is inside its own
+        # inflation bubble and A* refuses to plan. The robot is demonstrably not
+        # in collision (it drove there), so carving a small free disc around the
+        # start lets A* escape the bubble while preserving full clearance
+        # everywhere else along the arc.
+        self.start_clear_radius_m  = rospy.get_param(f"{ns}/start_clear_radius_m", 0.60)
         # LiDAR points closer than this are dropped (the robot's own footprint).
         self.scan_min_range        = rospy.get_param(f"{ns}/scan_min_range", 0.30)
         # LiDAR points farther than this are dropped (noise / out of useful range).
@@ -128,6 +149,15 @@ class LocalReplanner:
         # Origin of obs_grid in map frame; updated as robot moves.
         self.obs_ox = 0.0
         self.obs_oy = 0.0
+        # Guard so the first recenter snaps the window straight onto the robot
+        # instead of relying on the >1/4-window drift test (which leaves the
+        # window centred on the map origin when the robot spawns within ~3.75 m
+        # of it).
+        self._obs_grid_origin_initialized = False
+        # Euclidean distance (m) from each obs_grid cell to the nearest
+        # persistent obstacle cell. Recomputed once per evaluate() tick and
+        # reused by every path-point blockage test.
+        self._obs_dist = None
 
         # ---- TF ------------------------------------------------------------
         self.tf_buf = tf2_ros.Buffer(cache_time=rospy.Duration(10.0))
@@ -353,6 +383,21 @@ class LocalReplanner:
         # Desired bottom-left so the robot sits at the centre.
         desired_ox = self.robot_xy[0] - half
         desired_oy = self.robot_xy[1] - half
+        # FIX (2026-07-30): on the very first call, snap the window origin
+        # directly onto the robot. obs_ox/obs_oy start at (0,0) — the map
+        # origin — so if the robot spawns within 1/4 window (~3.75 m) of it the
+        # drift test below returns early and the window stays mis-centred,
+        # truncating the lookahead on one side.
+        if not self._obs_grid_origin_initialized:
+            with self.lock:
+                self.obs_ox = desired_ox
+                self.obs_oy = desired_oy
+                self.obs_grid[:] = 0.0
+                if getattr(self, "obs_first", None) is not None:
+                    self.obs_first[:] = 0.0
+                self._obs_grid_origin_initialized = True
+            return
+
         dx_cells = int(round((desired_ox - self.obs_ox) / self.map_res))
         dy_cells = int(round((desired_oy - self.obs_oy) / self.map_res))
         # Only bother shifting if the drift exceeds 1/4 window.
@@ -361,6 +406,14 @@ class LocalReplanner:
 
         with self.lock:
             new = np.zeros_like(self.obs_grid)
+            # FIX (2026-07-02): also shift obs_first in lockstep so accumulated
+            # persistence timestamps survive the recenter. Previously only obs_grid
+            # was shifted; obs_first stayed at old positions, causing its entries
+            # for already-seen cells to become misaligned and effectively zeroed on
+            # the next _compute_persistent_mask call — resetting the 7s clock and
+            # preventing detours from ever firing when the robot approached an
+            # obstacle while moving (the common case).
+            new_first = np.zeros_like(self.obs_grid)
             # Copy overlap region from old grid into new grid (shifted).
             src_x0 = max(0, dx_cells)
             src_y0 = max(0, dy_cells)
@@ -373,7 +426,13 @@ class LocalReplanner:
             if src_x1 > src_x0 and src_y1 > src_y0:
                 new[dst_y0:dst_y1, dst_x0:dst_x1] = \
                     self.obs_grid[src_y0:src_y1, src_x0:src_x1]
+                if hasattr(self, "obs_first") and self.obs_first is not None \
+                        and self.obs_first.shape == self.obs_grid.shape:
+                    new_first[dst_y0:dst_y1, dst_x0:dst_x1] = \
+                        self.obs_first[src_y0:src_y1, src_x0:src_x1]
             self.obs_grid = new
+            if hasattr(self, "obs_first") and self.obs_first is not None:
+                self.obs_first = new_first
             self.obs_ox = self.obs_ox + dx_cells * self.map_res
             self.obs_oy = self.obs_oy + dy_cells * self.map_res
 
@@ -394,6 +453,23 @@ class LocalReplanner:
         with self.lock:
             obs = self.obs_grid
             persistent_mask = self._compute_persistent_mask(obs, now)
+            # Distance field over the persistent mask, computed ONCE per tick.
+            # _point_blocked_dynamic() reads it for every path point, so this
+            # replaces one EDT per point with one EDT per evaluation.
+            if np.any(persistent_mask):
+                self._obs_dist = distance_transform_edt(~persistent_mask) * self.map_res
+            else:
+                self._obs_dist = None
+            # Snapshot the grid origin *inside the lock*, together with the
+            # distance field it belongs to. scan_cb runs on another thread and
+            # can recenter the window (moving obs_ox/obs_oy) at any moment; if
+            # the blockage tests below read the live self.obs_ox against this
+            # tick's _obs_dist, world->grid conversion is offset and the blocked
+            # span lands on the wrong cells. Everything downstream in this tick
+            # uses these locals, never self.obs_*.
+            obs_dist   = self._obs_dist
+            obs_ox_now = self.obs_ox
+            obs_oy_now = self.obs_oy
 
         # 2) Find the robot's index on the current path using monotonic
         # windowed search. This prevents argmin from jumping to the
@@ -402,10 +478,35 @@ class LocalReplanner:
         i_now = self._closest_path_index_windowed(
             self.current_path, self.robot_xy, self.last_i_now)
         self.last_i_now = i_now
+        
+        n_persist = int(persistent_mask.sum())
+        if hasattr(self, 'obs_first') and self.obs_first is not None \
+                and np.any(self.obs_first > 0):
+            max_age = float((now - self.obs_first[self.obs_first > 0]).max())
+        else:
+            max_age = 0.0
+        # Minimum clearance between the upcoming path and any persistent cell.
+        # If persistent_cells > 0 but this stays above block_check_radius_m, the
+        # obstacle is beside the path rather than on it — no detour is correct.
+        min_clear = float("inf")
+        if obs_dist is not None and self.current_path:
+            hi = min(len(self.current_path),
+                     i_now + int(self.lookahead_check_m / self.densify_step))
+            for k in range(i_now, hi):
+                px, py = self.current_path[k]
+                gx = int((px - obs_ox_now) / self.map_res)
+                gy = int((py - obs_oy_now) / self.map_res)
+                if 0 <= gx < self.obs_grid_w and 0 <= gy < self.obs_grid_h:
+                    min_clear = min(min_clear, float(obs_dist[gy, gx]))
+        rospy.loginfo_throttle(
+            2.0, f"[eval] persistent_cells={n_persist} "
+                 f"max_obs_age={max_age:.1f}s/{self.persistence_threshold:.1f}s "
+                 f"path_clearance={min_clear:.2f}m/{self.block_check_radius_m:.2f}m "
+                 f"i_now={i_now} detour_active={self.detour_active}")
 
         # 3) Find the first blocked index ahead within lookahead_check_m.
         i_block_start, i_block_end = self._find_blocked_span(
-            self.current_path, i_now, persistent_mask)
+            self.current_path, i_now, obs_dist, obs_ox_now, obs_oy_now)
 
         if i_block_start is None:
             # No persistent obstacle ahead on current_path. Do nothing.
@@ -431,7 +532,8 @@ class LocalReplanner:
                 "Computing detour.", i_block_start, i_block_end, i_now)
 
             self._compute_and_apply_detour(i_now, i_block_start, i_block_end,
-                                           persistent_mask)
+                                           persistent_mask,
+                                           obs_dist, obs_ox_now, obs_oy_now)
 
         # 5) Publish visualization (always, so RViz sees the mask even when clear).
         self._publish_viz(persistent_mask)
@@ -513,11 +615,7 @@ class LocalReplanner:
         d2 = (px - xy[0]) ** 2 + (py - xy[1]) ** 2
         return lo + int(np.argmin(d2))
 
-    def _find_blocked_span(self, path, i_start, persistent_mask):
-        """Scan forward from i_start. Return (first_blocked, last_blocked)
-        in path-index space, or (None, None) if no blockage within lookahead.
-
-        Looks ahead at most lookahead_check_m metres along the path."""
+    def _find_blocked_span(self, path, i_start, obs_dist, obs_ox, obs_oy):
         if not path:
             return None, None
         max_steps = int(self.lookahead_check_m / self.densify_step)
@@ -526,7 +624,14 @@ class LocalReplanner:
         blocked = []
         for i in range(i_start, i_end):
             x, y = path[i]
-            if self._point_in_mask(x, y, persistent_mask):
+            # FIX (2026-07-30): distance-based test, not cell membership.
+            # See block_check_radius_m in __init__ for why. obs_dist/obs_ox/
+            # obs_oy are the per-tick snapshot taken under the lock in
+            # evaluate(), so a concurrent recenter cannot offset the lookup.
+            is_dynamic = self._point_blocked_dynamic(
+                x, y, obs_dist, obs_ox, obs_oy)
+            is_static  = self._point_in_static_wall(x, y)
+            if is_dynamic or is_static:
                 blocked.append(i)
 
         if not blocked:
@@ -540,12 +645,43 @@ class LocalReplanner:
         if gx < 0 or gx >= self.obs_grid_w or gy < 0 or gy >= self.obs_grid_h:
             return False
         return bool(mask[gy, gx])
+    
+    def _point_blocked_dynamic(self, x, y, obs_dist, obs_ox, obs_oy,
+                               radius=None):
+        """Is (x,y) within `radius` metres of a persistent dynamic obstacle?
+
+        Uses the per-tick distance field so an obstacle's invisible interior and
+        the gaps between discretised laser-return cells both count as blocked.
+        obs_dist/obs_ox/obs_oy are the snapshot captured under the lock in
+        evaluate(); callers must pass them rather than reading self.obs_* so a
+        concurrent scan_cb recenter cannot desync the field from its origin.
+        Defaults to block_check_radius_m (~robot half-width).
+        """
+        if obs_dist is None:
+            return False
+        if radius is None:
+            radius = self.block_check_radius_m
+        gx = int((x - obs_ox) / self.map_res)
+        gy = int((y - obs_oy) / self.map_res)
+        if gx < 0 or gx >= self.obs_grid_w or gy < 0 or gy >= self.obs_grid_h:
+            return False
+        return bool(obs_dist[gy, gx] <= radius)
+
+    def _point_in_static_wall(self, x, y):
+        """Is (x,y) in the inflated static wall zone (i.e. blocked by the map)?"""
+        if self.static_inflated is None:
+            return False
+        gx = int((x - self.map_ox) / self.map_res)
+        gy = int((y - self.map_oy) / self.map_res)
+        if gx < 0 or gx >= self.map_w or gy < 0 or gy >= self.map_h:
+            return True   # out of map = treat as wall
+        return not bool(self.static_inflated[gy, gx])
 
     # ====================================================================
     #  DETOUR
     # ====================================================================
     def _compute_and_apply_detour(self, i_now, i_block_start, i_block_end,
-                                  persistent_mask):
+                                  persistent_mask, obs_dist, obs_ox, obs_oy):
         """A* around the blocked span and splice into the path."""
         path = self.current_path
 
@@ -564,17 +700,33 @@ class LocalReplanner:
 
         # Walk further forward until the rejoin point is itself clear of the
         # mask (don't rejoin into an obstacle).
-        while rejoin < len(path) - 1 and self._point_in_mask(
-                path[rejoin][0], path[rejoin][1], persistent_mask):
+        # FIX (2026-07-30): test against obstacle_inflate_m, not raw cell
+        # membership. The A* grid blocks everything within obstacle_inflate_m of
+        # a persistent cell, so a rejoin point merely OUTSIDE the shell is still
+        # "Goal cell occupied" as far as A* is concerned. Uses the per-tick
+        # origin snapshot (obs_dist/obs_ox/obs_oy) for the same thread-safety
+        # reason as _find_blocked_span.
+        while rejoin < len(path) - 1 and self._point_blocked_dynamic(
+                path[rejoin][0], path[rejoin][1], obs_dist, obs_ox, obs_oy,
+                radius=self.obstacle_inflate_m):
             rejoin += 1
-
-        # Build the inflated A* grid: static_inflated AND-NOT persistent_obs.
-        astar_grid = self._build_astar_grid(persistent_mask)
-        if astar_grid is None:
-            return
 
         p_start = path[backstep]
         p_goal  = path[rejoin]
+
+        # Build the inflated A* grid: static_inflated AND-NOT persistent_obs,
+        # with a small free disc carved around p_start.
+        # FIX (2026-07-30): backstep is clamped to i_now so it can never move
+        # behind the robot. When HOLD has fired, the robot is only
+        # obstacle_stop_range (0.90 m) from the obstacle while
+        # obstacle_inflate_m is 1.2 m — so p_start lands inside its own
+        # inflation bubble and A* aborts with "Start cell is occupied".
+        # The robot drove to p_start, so it is not in collision; carving a
+        # start_clear_radius_m disc lets A* leave the bubble.
+        astar_grid = self._build_astar_grid(persistent_mask, obs_ox, obs_oy,
+                                            start_xy=p_start)
+        if astar_grid is None:
+            return
         detour = astar_plan(astar_grid, p_start[0], p_start[1],
                             p_goal[0], p_goal[1], connectivity=8)
 
@@ -626,9 +778,20 @@ class LocalReplanner:
         self._publish(self.baseline_path)
         rospy.loginfo("[local_replanner] obstacle cleared — baseline restored.")
 
-    def _build_astar_grid(self, persistent_mask):
+    def _build_astar_grid(self, persistent_mask, obs_ox, obs_oy, start_xy=None):
         """Build a SimpleOccupancyGrid combining the inflated static map with
-        the inflated persistent obstacles. Both are inflated by robot_radius."""
+        the inflated persistent obstacles.
+
+        obs_ox/obs_oy are the grid origin SNAPSHOT that persistent_mask was
+        computed against (captured under the lock in evaluate()). They must be
+        passed in rather than read from self.obs_* — scan_cb can recenter the
+        window on another thread between the snapshot and this call, and
+        projecting the mask with a moved origin would place the obstacle up to
+        1/4-window (~3.75 m) away from where the detour endpoints were chosen.
+
+        If start_xy is given, a disc of radius start_clear_radius_m around it is
+        forcibly marked free so A* can plan out of a position the robot already
+        occupies (see _compute_and_apply_detour for why this is needed)."""
         if self.static_inflated is None:
             return None
 
@@ -638,9 +801,9 @@ class LocalReplanner:
         # Now subtract the persistent obstacles, also inflated.
         if np.any(persistent_mask):
             # The persistent mask is in the local obs_grid frame; project it
-            # into the global map grid by computing the offset.
-            ox_cells = int(round((self.obs_ox - self.map_ox) / self.map_res))
-            oy_cells = int(round((self.obs_oy - self.map_oy) / self.map_res))
+            # into the global map grid using the SNAPSHOT origin it belongs to.
+            ox_cells = int(round((obs_ox - self.map_ox) / self.map_res))
+            oy_cells = int(round((obs_oy - self.map_oy) / self.map_res))
 
             # Inflate the obstacle mask (cells within obstacle_inflate_m of
             # any persistent cell are treated as blocked).
@@ -657,6 +820,28 @@ class LocalReplanner:
             sy0 = y0 - oy_cells; sy1 = sy0 + (y1 - y0)
             if x1 > x0 and y1 > y0:
                 free[y0:y1, x0:x1] &= ~inflated_obs_blocked[sy0:sy1, sx0:sx1]
+
+        # Carve a free disc around the A* start so the planner can escape an
+        # inflation bubble the robot is already standing in.
+        if start_xy is not None:
+            sgx = int((start_xy[0] - self.map_ox) / self.map_res)
+            sgy = int((start_xy[1] - self.map_oy) / self.map_res)
+            rad = int(math.ceil(self.start_clear_radius_m / self.map_res))
+            H, W = free.shape
+            if 0 <= sgx < W and 0 <= sgy < H:
+                # FIX (2026-07-30): clamp slice bounds to [0, W/H]. Near a map
+                # edge sgy-rad or sgx-rad can go negative; a negative slice
+                # start in numpy counts from the far end, producing an empty or
+                # wrong-shaped slice and a broadcast ValueError that would kill
+                # the evaluate() timer thread. BCD lane ends sit on obstacle
+                # boundaries, so edge-proximate detours are the common case.
+                y0 = max(0, sgy - rad); y1 = min(H, sgy + rad + 1)
+                x0 = max(0, sgx - rad); x1 = min(W, sgx + rad + 1)
+                yy, xx = np.ogrid[y0:y1, x0:x1]
+                disc = ((yy - sgy) ** 2 + (xx - sgx) ** 2) <= rad * rad
+                # Never re-free a STATIC wall — only dynamic inflation is
+                # carved. Driving into a wall must stay impossible.
+                free[y0:y1, x0:x1] |= (disc & self.static_inflated[y0:y1, x0:x1])
 
         data = np.where(free, 0, 100).astype(np.int16).reshape(-1).tolist()
         return SimpleOccupancyGrid(

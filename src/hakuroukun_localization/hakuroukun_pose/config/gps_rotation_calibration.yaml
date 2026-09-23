@@ -1,0 +1,9 @@
+rotation_angle_deg: 75.213
+calibrated_at: '2026-07-17T09:00:00'
+segments_used: 3
+segment_agreement_deg: 0.97
+candidate_angles_deg:
+- -164.80
+- -165.07
+- -165.77
+manual_override: true

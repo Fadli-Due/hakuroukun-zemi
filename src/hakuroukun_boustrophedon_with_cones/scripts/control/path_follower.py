@@ -4,7 +4,7 @@ import numpy as np
 import rospy
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Float64MultiArray, Bool
+from std_msgs.msg import Float64MultiArray, Bool, Int8MultiArray
 from scipy.spatial.transform import Rotation
 import tf2_ros
 from geometry_msgs.msg import PoseStamped
@@ -25,37 +25,43 @@ class PurePursuitNode:
         self.lookahead_dist   = rospy.get_param(f"{pp_ns}/lookahead_distance", 1.5)
         self.wheelbase        = rospy.get_param(f"{pp_ns}/wheelbase", 1.1)
         self.ctrl_rate        = rospy.get_param(f"{pp_ns}/control_rate", 10)
-        # How many path steps to skip forward when HOLD times out and the
-        # replanner failed to produce a new path (static wall / map boundary).
-        # 40 steps × 0.20m densify = 8m skip — enough to jump past a stuck
-        # corner turn onto the next coverage lane.
         self.skip_on_timeout  = rospy.get_param(f"{pp_ns}/skip_on_timeout", 40)
-        self.obstacle_stop_range = rospy.get_param(f"{pp_ns}/obstacle_stop_range", 0.45)
+        self.obstacle_stop_range = rospy.get_param(f"{pp_ns}/obstacle_stop_range", 0.70)
+        self.hold_half_width = rospy.get_param(f"{pp_ns}/hold_corridor_half_width", 0.55)
+        self.hold_max_range  = rospy.get_param(f"{pp_ns}/hold_corridor_max_range",  3.0)
+        self.hold_front_offset = rospy.get_param(f"{pp_ns}/hold_front_offset", 0.0)
 
         # ========== Reverse parameters ==========
         rp = rospy.get_param("reverse", {})
-        self.rev_enable   = rp.get("enable", True)
-        self.rev_speed    = abs(rp.get("speed", 0.25))
-        self.rev_max_t    = rp.get("max_duration", 2.0)
-        self.front_stop   = rp.get("front_stop_range", 0.8)
-        self.front_clear  = rp.get("front_clear_range", 1.2)
-        self.front_fov    = math.radians(rp.get("front_fov_deg", 90))
-        self.ang_thresh   = math.radians(rp.get("angle_threshold_deg", 100))
-        self.stuck_time   = rp.get("stuck_time", 3.0)
-        self.progress_min = rp.get("progress_min", 0.05)
+        self.rev_enable    = rp.get("enable", True)
+        self.rev_speed     = abs(rp.get("speed", 0.25))
+        self.rev_max_t     = rp.get("max_duration", 4.0)
+        self.min_rev_dwell = rp.get("min_dwell", 1.5)
+        self.front_stop    = rp.get("front_stop_range", 0.8)
+        self.front_clear   = rp.get("front_clear_range", 1.2)
+        self.front_fov     = math.radians(rp.get("front_fov_deg", 90))
+        self.ang_thresh    = math.radians(rp.get("angle_threshold_deg", 100))
+        self.stuck_time    = rp.get("stuck_time", 3.0)
+        self.progress_min  = rp.get("progress_min", 0.05)
+
+        # How long to let FORWARD-only steering keep trying before giving up
+        # on a tight corner (nothing blocking, just geometry).
+        self.fwd_only_grace = rp.get("fwd_only_grace_time", 15.0)
+        # Tracks how long FORWARD has been stuck with nothing blocking.
+        self.fwd_only_stuck_start = None
+
+        # Gear engagement tracking.
+        self.gear_engage_timeout = rp.get("gear_engage_timeout", 3.0)
+        self.gear_actual = 0
+        self.gear_pend   = 0
+        self.rev_gear_engaged_at = None
 
         # recovery bookkeeping
         self.stuck_start = None
         self.cooldown_until = 0.0
-        self.rev_cooldown = rp.get("cooldown", 3.0)   # seconds
+        self.rev_cooldown = rp.get("cooldown", 3.0)
 
-        # ========== HOLD-mode parameters (2026-06-22) ==========
-        # When the robot detects an obstacle ahead it now enters HOLD instead
-        # of immediately reversing. Staying stationary lets the replanner's
-        # persistence timer accumulate cleanly (the obs_grid stops shifting
-        # under recentering) so a detour can fire within persistence_threshold
-        # seconds. Once a new path arrives, the robot reverses briefly to
-        # clear the obstacle, then follows the new (detour-spliced) path.
+        # ========== HOLD-mode parameters ==========
         self.max_hold_time = rp.get("max_hold_time", 15.0)
         self.hold_start = None
         self.hold_entry_path_version = 0
@@ -63,23 +69,27 @@ class PurePursuitNode:
 
         # extra tuning params
         self.goal_tol = rospy.get_param(f"{pp_ns}/goal_tolerance", 0.4)
-        self.steer_lpf = rospy.get_param(f"{pp_ns}/steer_lpf", 0.35)  # weight on previous
+        self.steer_lpf = rospy.get_param(f"{pp_ns}/steer_lpf", 0.35)
         self.steer_prev = 0.0
         self.closest_i = 0
         self.max_search_ahead = rospy.get_param(f"{pp_ns}/max_search_ahead", 80)
 
         # -------- internal state --------
-        self.current_pose = None        # (x, y, yaw) in map frame
-        self.path_points  = []          # list[(x,y)] in map frame
+        self.current_pose = None
+        self.path_points  = []
         self.path_available = False
         self.previous_speed = 0.0
         self.last_alpha = 0.0
 
         self.mode = "FORWARD"
+        self.rev_reason = "BLOCKED"  # Can be "BLOCKED" or "GEOMETRY"
         self.rev_start = None
         self.min_front = float('inf')
         self.prog_hist = collections.deque(maxlen=200)
         self.pose_hist = collections.deque(maxlen=200)
+
+        # Map->odom calibration gate.
+        self.map_odom_ready = False
 
         # -------- TF Buffer --------
         self.tf_buf = tf2_ros.Buffer(cache_time=rospy.Duration(10.0))
@@ -92,22 +102,17 @@ class PurePursuitNode:
         rospy.Subscriber('/desired_path', Path, self.path_cb)
         rospy.Subscriber('/scan_multi', LaserScan, self.scan_cb)
         rospy.Subscriber('/stop_signal', Bool, self.stop_cb)
+        rospy.Subscriber('/hakuroukun/gear_state', Int8MultiArray, self.gear_state_cb)
+        rospy.Subscriber('/map_odom_calibrator/initialized', Bool, self.map_odom_init_cb)
 
-        cmd_topic = rospy.get_param("~cmd_topic", "/hakuroukun_steering_controller/cmd_controller")
+        cmd_topic = rospy.get_param("~cmd_topic", "/cmd_controller")
         self.cmd_pub = rospy.Publisher(cmd_topic, Float64MultiArray, queue_size=10)
 
-        # /path_follower/done: latched Bool published exactly once when the
-        # robot has completed the current /desired_path (near final point AND
-        # stopped for done_dwell_time seconds). Subscribed by return_to_start.py
-        # which then computes the A* return-to-home leg.
         self.done_pub = rospy.Publisher(
             '/path_follower/done', Bool, queue_size=1, latch=True)
-        # Dwell time (s) the robot must stay near goal & stopped before /done fires.
-        # Prevents firing during end-of-path wiggle (REVERSE/FORWARD recovery
-        # oscillation seen near closest_i ~= len(path)-2).
         self.done_dwell_time = rospy.get_param(f"{pp_ns}/done_dwell_time", 2.0)
-        self.done_at_goal_since = None  # rospy.Time when goal-arrival began
-        self.done_published = False     # one-shot guard
+        self.done_at_goal_since = None
+        self.done_published = False
 
         rospy.on_shutdown(self.stop_robot)
 
@@ -116,12 +121,24 @@ class PurePursuitNode:
         if msg.data:
             self.stop_robot()
 
+    def gear_state_cb(self, msg):
+        if len(msg.data) >= 2:
+            self.gear_actual = int(msg.data[0])
+            self.gear_pend   = int(msg.data[1])
+
+    def map_odom_init_cb(self, msg):
+        if msg.data and not self.map_odom_ready:
+            self.map_odom_ready = True
+            rospy.loginfo(
+                "[path_follower] map->odom calibrated — motion gate released.")
+        self.map_odom_ready = bool(msg.data)
+
     def odom_cb(self, msg):
         try:
             ps = PoseStamped()
-            ps.header = msg.header                # frame_id should be "odom"
+            ps.header = msg.header
             ps.pose = msg.pose.pose
-            ps.header.stamp = rospy.Time(0)       # use latest TF
+            ps.header.stamp = rospy.Time(0)
             ps_map = self.tf_buf.transform(ps, "map", rospy.Duration(0.1))
         except Exception as e:
             rospy.logwarn_throttle(2.0,
@@ -134,7 +151,6 @@ class PurePursuitNode:
         yaw = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_euler("zyx")[0]
         self.current_pose = (x, y, yaw)
 
-        # progress tracking (now in map frame — wheel slip can't fake it)
         now = rospy.Time.now().to_sec()
         if hasattr(self, 'last_pos'):
             d = math.hypot(x - self.last_pos[0], y - self.last_pos[1])
@@ -155,23 +171,12 @@ class PurePursuitNode:
         self.path_points = [(p.pose.position.x, p.pose.position.y)
                             for p in msg.poses]
 
-        # FIX (2026-06-23): smart closest_i seeding.
-        #
-        # The old code reset closest_i = 0 unconditionally. After a detour
-        # splice, the robot is physically at backstep (somewhere mid-path,
-        # e.g. index 150). With max_search_ahead=25 (5m window), lookahead_
-        # point()'s closest-index scan [0..25] never reaches the robot's real
-        # position. It falls through all fallbacks and returns path_points[-1]
-        # — the literal end of the coverage route — as the PP target. The
-        # robot then steers directly toward the far end of the map, cutting
-        # across restricted zones. (Observed: robot entered cone zone after
-        # first detour fired, 2026-06-23 Case 3.)
-        #
-        # Fix: seed closest_i at the path point nearest the robot's current
-        # pose. O(N) in path length, but only runs when a new path arrives
-        # (at most a few times per run). For the initial path (no prior pose),
-        # falls back to 0 as before.
-        if self.current_pose and self.path_points:
+        if self.mode == "HOLD" and self.path_points:
+            self.closest_i = min(self.closest_i, len(self.path_points) - 1)
+            rospy.loginfo(
+                f"[path_follower] new path ({len(self.path_points)} pts): "
+                f"closest_i preserved at {self.closest_i} (HOLD — detour splice)")
+        elif self.current_pose and self.path_points:
             rx, ry, _ = self.current_pose
             best_i, best_d2 = 0, float('inf')
             for i, (px, py) in enumerate(self.path_points):
@@ -190,17 +195,7 @@ class PurePursuitNode:
                 f"closest_i = 0 (no pose yet)")
 
         self.path_available = bool(self.path_points)
-        # Bump on every new path. The HOLD state watches this to detect that
-        # the replanner has spliced in a detour, which is the cue to reverse
-        # briefly and start following the new route.
         self.path_version += 1
-
-        # Reset the goal-arrival dwell timer. A new path is incoming — the
-        # robot is no longer "at goal" w.r.t. the old path. The /done flag
-        # stays True (latched) for any subscriber that already consumed it
-        # (e.g. return_to_start.py), but the dwell-tracking state is fresh
-        # so it doesn't immediately re-fire when the robot reaches the end
-        # of the new (return) path.
         self.done_at_goal_since = None
 
     def scan_cb(self, msg):
@@ -209,28 +204,68 @@ class PurePursuitNode:
             self.min_front = float('inf')
             return
 
-        angles = msg.angle_min + np.arange(n) * msg.angle_increment
-        mask   = np.abs(angles) <= self.front_fov/2.0
-        if not np.any(mask):
+        # Transform points into base_link ONLY to select the forward corridor —
+        # "forward" is a base_link concept, and the merged-scan frame's 0-angle is
+        # NOT robot-forward (that mismatch is why the old wedge saw nothing).
+        try:
+            tr = self.tf_buf.lookup_transform(
+                "base_link", msg.header.frame_id or "laser_link",
+                rospy.Time(0), rospy.Duration(0.05))
+        except Exception as e:
+            rospy.logwarn_throttle(2.0, f"[path_follower] laser->base_link TF: {e}")
             self.min_front = float('inf')
             return
 
-        rng = np.asarray(msg.ranges)[mask]
+        q = tr.transform.rotation
+        yaw = math.atan2(2.0*(q.w*q.z + q.x*q.y),
+                        1.0 - 2.0*(q.y*q.y + q.z*q.z))
+        c, s = math.cos(yaw), math.sin(yaw)
+        tx, ty = tr.transform.translation.x, tr.transform.translation.y
 
-        # reject invalid + too-small values
-        rng = rng[np.isfinite(rng)]
-        if msg.range_min > 0:
-            rng = rng[rng >= msg.range_min]
-        rng = rng[rng > 0.02]
+        angles = msg.angle_min + np.arange(n, dtype=np.float32) * msg.angle_increment
+        ranges = np.asarray(msg.ranges, dtype=np.float32)
+        valid = (np.isfinite(ranges) &
+                (ranges >= max(msg.range_min, 0.05)) &
+                (ranges <= min(msg.range_max, 10.0)))
+        if not np.any(valid):
+            self.min_front = float('inf')
+            return
 
-        self.min_front = float(np.min(rng)) if rng.size else float('inf')
+        r  = ranges[valid]; a = angles[valid]
+        xl = r*np.cos(a);   yl = r*np.sin(a)
+        xb = c*xl - s*yl + tx      # point x in base_link
+        yb = s*xl + c*yl + ty      # point y in base_link
+
+        # Forward corridor: ahead of the FRONT of the robot, within half the lane width.
+        fo = self.hold_front_offset
+        front = ((xb > fo) &
+                (xb < fo + self.hold_max_range) &
+                (np.abs(yb) < self.hold_half_width))
+        if not np.any(front):
+            self.min_front = float('inf')
+            return
+
+        # Distance from the front of the robot to the nearest in-corridor point.
+        self.min_front = float((xb[front] - fo).min())
+
+        rospy.loginfo_throttle(
+            1.0,
+            f"[path_follower] min_front={self.min_front:.2f} n_front={int(front.sum())}")
 
     # ---------- Main loop ----------
     def run(self):
         rate = rospy.Rate(self.ctrl_rate)
-        pp_ns = "pure_pursuit_hakuroukun"
 
         while not rospy.is_shutdown():
+            # Gate 0: map->odom calibration
+            if not self.map_odom_ready:
+                rospy.logwarn_throttle(
+                    2.0,
+                    "[path_follower] waiting for map->odom calibration — "
+                    "click '2D Pose Estimate' in RViz...")
+                rate.sleep()
+                continue
+
             # Gate 1: pose
             if not self.current_pose:
                 rospy.logwarn_throttle(2.0, "[path_follower] waiting for odom...")
@@ -243,25 +278,20 @@ class PurePursuitNode:
                 rate.sleep()
                 continue
 
-            # Normal PP — compute desired forward command
             v_fwd, steer_fwd = self.compute_pp()
-            # ROS sim time so timers stay in lockstep with the replanner's
-            # persistence_threshold (which uses rospy.Time). With wall-clock
-            # time.time(), HOLD could time out before persistence had even
-            # accumulated — observed 2026-06-22 when sim ran at ~50% real.
             now = rospy.Time.now().to_sec()
 
-            # Net displacement over the stuck window (immune to jitter)
+            # Net displacement over the stuck window
             if len(self.pose_hist) >= 2:
                 _, x0, y0 = self.pose_hist[0]
                 _, x1, y1 = self.pose_hist[-1]
                 net_disp = math.hypot(x1 - x0, y1 - y0)
             else:
-                net_disp = float('inf')   # not enough history yet → not stuck
+                net_disp = float('inf')
             stuck = net_disp < self.progress_min
             heading_bad = abs(self.last_alpha) > self.ang_thresh
 
-            # Start / reset stuck timer
+            # Stuck timer
             if stuck:
                 if self.stuck_start is None:
                     self.stuck_start = now
@@ -270,64 +300,109 @@ class PurePursuitNode:
             stuck_dur = 0.0 if self.stuck_start is None else (now - self.stuck_start)
 
             # ── Triggers ─────────────────────────────────────────────────
-            # Obstacle imminent → HOLD (stop, wait for the replanner).
-            # Holding stationary lets persistence build up cleanly.
             want_hold = (self.min_front < self.obstacle_stop_range)
 
-            # Legacy stuck-recovery: only fires when the robot is stuck
-            # WITHOUT an immediate obstacle (e.g. U-turn binding, steering
-            # geometry edge case). Obstacles are handled by want_hold.
-            want_recover_reverse = (
-                (stuck_dur > self.stuck_time) or
-                ((self.min_front < self.front_stop) and
-                 (stuck_dur > 0.3 or heading_bad))
+            # Something physically blocking — reverse immediately once stuck.
+            want_recover_reverse_blocked = (
+                self.min_front < self.front_stop and
+                (stuck_dur > 0.3 or heading_bad)
             )
 
-            # ── FSM with cooldown to prevent oscillation ─────────────────
+            # Geometry-stuck only (clear path ahead, just can't complete the corner).
+            geometry_stuck = (
+                stuck_dur > self.stuck_time and
+                self.min_front >= self.front_stop
+            )
+            if geometry_stuck:
+                if self.fwd_only_stuck_start is None:
+                    self.fwd_only_stuck_start = now
+            else:
+                self.fwd_only_stuck_start = None
+            fwd_only_dur = (
+                0.0 if self.fwd_only_stuck_start is None
+                else (now - self.fwd_only_stuck_start)
+            )
+            want_skip_corner = (fwd_only_dur > self.fwd_only_grace)
+
+            # Stage 3 Recovery Trigger: If stuck for more than 8.0s, and front is clear,
+            # we perform a brief reverse nudge to relieve binding tension and reposition.
+            want_recover_reverse_geometry = (
+                stuck_dur > 8.0 and
+                self.min_front >= self.front_stop
+            )
+
+            # ── FSM ──────────────────────────────────────────────────────
             if self.mode == "FORWARD":
                 if want_hold:
                     self.mode = "HOLD"
                     self.hold_start = now
                     self.hold_entry_path_version = self.path_version
                     self.stuck_start = None
+                    self.fwd_only_stuck_start = None
                     rospy.loginfo(
                         f"MODE → HOLD (obstacle ahead) min_front={self.min_front:.2f} "
                         f"— waiting for replanner (max {self.max_hold_time:.0f}s)")
-                elif self.rev_enable and (now > self.cooldown_until) and want_recover_reverse:
+
+                elif self.rev_enable and (now > self.cooldown_until) and want_recover_reverse_blocked:
                     self.mode = "REVERSE"
+                    self.rev_reason = "BLOCKED"
                     self.rev_start = now
-                    rospy.loginfo(f"MODE → REVERSE (recover) front={self.min_front:.2f} "
-                                f"stuck={stuck_dur:.2f} heading_bad={heading_bad}")
+                    self.rev_gear_engaged_at = None
+                    self.fwd_only_stuck_start = None
+                    rospy.loginfo(
+                        f"MODE → REVERSE (obstacle blocking) front={self.min_front:.2f} "
+                        f"stuck={stuck_dur:.2f} heading_bad={heading_bad}")
+
+                elif self.rev_enable and (now > self.cooldown_until) and want_recover_reverse_geometry:
+                    # Switch to reverse due to geometry bind (no obstacle in front)
+                    self.mode = "REVERSE"
+                    self.rev_reason = "GEOMETRY"
+                    self.rev_start = now
+                    self.rev_gear_engaged_at = None
+                    self.fwd_only_stuck_start = None
+                    rospy.logwarn(
+                        f"MODE → REVERSE (geometry bind relief) stuck={stuck_dur:.1f}s, "
+                        f"clear path ahead. Initiating reverse wiggle nudge.")
+
+                elif want_skip_corner:
+                    # Geometry-stuck fallback: skip forward past the tight corner
+                    old_i = self.closest_i
+                    self.closest_i = min(
+                        self.closest_i + self.skip_on_timeout,
+                        len(self.path_points) - 1)
+                    self.stuck_start = None
+                    self.fwd_only_stuck_start = None
+                    rospy.logwarn(
+                        f"MODE stays FORWARD — geometry corner skip: "
+                        f"path index {old_i} → {self.closest_i} "
+                        f"(fwd_only_dur={fwd_only_dur:.1f}s, min_front={self.min_front:.2f})")
 
             elif self.mode == "HOLD":
                 hold_dur = now - (self.hold_start if self.hold_start is not None else now)
 
-                # A) New path arrived — replanner did its job, time to clear
-                #    space by reversing, then follow the new (detoured) path.
                 if self.path_version > self.hold_entry_path_version:
                     self.mode = "REVERSE"
+                    self.rev_reason = "BLOCKED"
                     self.rev_start = now
+                    self.rev_gear_engaged_at = None
                     rospy.loginfo(
                         f"MODE → REVERSE (new path received, clearing space) "
                         f"hold_dur={hold_dur:.1f}s")
 
-                # B) Held too long with no detour — replanner couldn't route
-                #    around a static wall / map boundary (A* failed). Skip
-                #    forward on the path to escape the stuck waypoints, then
-                #    guided-reverse to realign with the new heading.
                 elif hold_dur > self.max_hold_time:
                     old_i = self.closest_i
                     self.closest_i = min(
                         self.closest_i + self.skip_on_timeout,
                         len(self.path_points) - 1)
                     self.mode = "REVERSE"
+                    self.rev_reason = "BLOCKED"
                     self.rev_start = now
+                    self.rev_gear_engaged_at = None
                     rospy.logwarn(
                         f"MODE → REVERSE (HOLD timed out at {self.max_hold_time:.0f}s "
                         f"— replanner failed, skipping path index "
                         f"{old_i} → {self.closest_i})")
 
-                # C) Obstacle cleared on its own (pedestrian walked away).
                 elif self.min_front > self.front_clear:
                     self.mode = "FORWARD"
                     self.stuck_start = None
@@ -337,13 +412,55 @@ class PurePursuitNode:
 
             else:  # REVERSE
                 duration = now - (self.rev_start if self.rev_start is not None else now)
+                gear_engaged_now = (self.gear_actual == 1 and self.gear_pend == 0)
 
-                # Stop reversing when we have space again OR we've reversed long enough
-                if (self.min_front > self.front_clear) or (duration > self.rev_max_t):
-                    self.mode = "FORWARD"
-                    self.cooldown_until = now + self.rev_cooldown
-                    self.stuck_start = None
-                    rospy.loginfo("MODE → FORWARD (recovered)")
+                if self.rev_gear_engaged_at is None:
+                    if gear_engaged_now:
+                        self.rev_gear_engaged_at = now
+                        rospy.loginfo(
+                            f"[pf] REVERSE gear engaged after {duration:.2f}s "
+                            f"— dwell clock starts now")
+                    elif duration > self.gear_engage_timeout:
+                        rospy.logwarn(
+                            f"[pf] REVERSE aborted: gear did not engage within "
+                            f"{self.gear_engage_timeout:.1f}s (gear={self.gear_actual} "
+                            f"pend={self.gear_pend})")
+                        self.mode = "FORWARD"
+                        self.cooldown_until = now + self.rev_cooldown
+                        self.rev_gear_engaged_at = None
+                        self.stuck_start = None
+                else:
+                    rev_motion_dur = now - self.rev_gear_engaged_at
+                    if rev_motion_dur < self.min_rev_dwell:
+                        pass
+                    else:
+                        # Determine exit conditions depending on why we reversed:
+                        if self.rev_reason == "GEOMETRY":
+                            # No obstacle exists, so reverse for a fixed reposition period
+                            should_exit = (rev_motion_dur >= min(2.5, self.rev_max_t))
+                        else:
+                            # Obstacle present: exit when front is clear OR duration exceeded
+                            should_exit = (self.min_front > self.front_clear) or (rev_motion_dur > self.rev_max_t)
+
+                        if should_exit:
+                            self.mode = "FORWARD"
+                            self.cooldown_until = now + self.rev_cooldown
+                            self.rev_gear_engaged_at = None
+                            self.stuck_start = None
+                            
+                            # Skip the index aggressively if recovering from geometry stall
+                            if self.rev_reason == "GEOMETRY":
+                                old_i = self.closest_i
+                                self.closest_i = min(
+                                    self.closest_i + int(self.skip_on_timeout * 1.5),
+                                    len(self.path_points) - 1)
+                                rospy.loginfo(
+                                    f"[pf] Geometry reverse recovery complete. "
+                                    f"Skipping index {old_i} → {self.closest_i}")
+                            else:
+                                rospy.loginfo(
+                                    f"MODE → FORWARD (recovered, rev_motion_dur={rev_motion_dur:.2f}s, "
+                                    f"total_rev_dur={duration:.2f}s)")
 
             # ── Command selection ────────────────────────────────────────
             if self.mode == "REVERSE":
@@ -355,17 +472,17 @@ class PurePursuitNode:
             else:
                 v, steer = v_fwd, steer_fwd
 
-            # 1Hz status heartbeat
+            # 1Hz heartbeat
             rospy.loginfo_throttle(
                 1.0,
                 f"[pf] mode={self.mode} v={v:.2f} steer={steer:.2f} "
                 f"min_front={self.min_front:.2f} alpha={self.last_alpha:.2f} "
                 f"closest_i={self.closest_i}/{len(self.path_points)} "
-                f"stuck_dur={stuck_dur:.1f} net_disp={net_disp:.2f}"
+                f"stuck_dur={stuck_dur:.1f} fwd_only_dur={fwd_only_dur:.1f} "
+                f"net_disp={net_disp:.2f} gear={self.gear_actual} pend={self.gear_pend}"
             )
 
-            # SAFETY VETO: block forward motion into close obstacles, but
-            # never block reverse — that's how we recover.
+            # SAFETY VETO
             if v > 0.0 and self.min_front < self.obstacle_stop_range:
                 rospy.logwarn_throttle(1.0,
                     f"[path_follower] FORWARD VETO min_front={self.min_front:.2f}")
@@ -386,7 +503,6 @@ class PurePursuitNode:
     def wrap_pi(self, a):
         return math.atan2(math.sin(a), math.cos(a))
 
-    # ---- returns (speed, steering) ----
     def compute_pp(self):
         x, y, yaw = self.current_pose
 
@@ -400,13 +516,6 @@ class PurePursuitNode:
             self.last_alpha = 0.0
             self.previous_speed = 0.0
 
-            # Goal reached — start (or continue) the dwell timer. Only
-            # publish /path_follower/done once the robot has held its
-            # arrival pose for done_dwell_time seconds. This filters out
-            # the end-of-path wiggle (REVERSE/FORWARD recovery oscillation
-            # near the final point) — without the dwell, /done could fire
-            # in the middle of a recovery transition and trigger the
-            # return leg before the robot is actually settled.
             now = rospy.Time.now()
             if self.done_at_goal_since is None:
                 self.done_at_goal_since = now
@@ -421,11 +530,29 @@ class PurePursuitNode:
 
             return (0.0, 0.0)
         else:
-            # Not at goal — clear the dwell timer so it restarts cleanly
-            # if/when the robot re-enters the goal region.
             self.done_at_goal_since = None
 
-        Lp = self.lookahead_point(x, y, yaw)
+        # ─── Dynamic Stuck Detection Recovery ───
+        is_stuck_now = False
+        wiggle_active = False
+        stuck_elapsed = 0.0
+        
+        if self.stuck_start is not None:
+            stuck_elapsed = rospy.Time.now().to_sec() - self.stuck_start
+            if stuck_elapsed > 2.0:
+                is_stuck_now = True
+            if stuck_elapsed > 4.0:
+                wiggle_active = True
+
+        active_lookahead = self.lookahead_dist
+        if is_stuck_now:
+            active_lookahead = self.lookahead_dist * 1.8
+            rospy.logwarn_throttle(
+                2.0,
+                f"[path_follower] Stall protection active: widening lookahead to {active_lookahead:.2f}m."
+            )
+
+        Lp = self.lookahead_point(x, y, yaw, active_lookahead)
         if Lp is None:
             fb = min(self.closest_i + 10, len(self.path_points) - 1)
             Lp = self.path_points[fb]
@@ -434,14 +561,35 @@ class PurePursuitNode:
         alpha = self.wrap_pi(math.atan2(dy, dx) - yaw)
         self.last_alpha = alpha
 
-        steering = math.atan2(2.0 * self.wheelbase * math.sin(alpha), self.lookahead_dist)
+        steering = math.atan2(2.0 * self.wheelbase * math.sin(alpha), active_lookahead)
         steering = max(self.MIN_STEERING, min(self.MAX_STEERING, steering))
 
         steering = (1.0 - self.steer_lpf) * steering + self.steer_lpf * self.steer_prev
         self.steer_prev = steering
 
-        curvature_penalty = max(0.25, 1.0 - abs(steering) / self.MAX_STEERING)
-        desired_speed = (self.MAX_SPEED - self.MIN_SPEED) * curvature_penalty + self.MIN_SPEED
+        # Wiggle steering if progress remains bound up for more than 4 seconds
+        if wiggle_active:
+            # Generate a 1.5Hz oscillation of +/- 0.15 radians (~8.5 degrees) to break static friction
+            wiggle_amplitude = 0.15
+            wiggle_frequency = 1.5
+            wiggle_offset = wiggle_amplitude * math.sin(2.0 * math.pi * wiggle_frequency * rospy.Time.now().to_sec())
+            steering = steering + wiggle_offset
+            steering = max(self.MIN_STEERING, min(self.MAX_STEERING, steering))
+            rospy.logwarn_throttle(
+                1.5,
+                f"[path_follower] Steering wiggle active (stuck {stuck_elapsed:.1f}s) to break friction."
+            )
+
+        if is_stuck_now and self.min_front >= self.front_stop:
+            # Bypass curvature limitations when stuck to generate maximum break-free torque
+            desired_speed = self.MAX_SPEED
+            rospy.logwarn_throttle(
+                2.0,
+                f"[path_follower] Stall protection speed boost active: v={desired_speed:.2f}m/s"
+            )
+        else:
+            curvature_penalty = max(0.25, 1.0 - abs(steering) / self.MAX_STEERING)
+            desired_speed = (self.MAX_SPEED - self.MIN_SPEED) * curvature_penalty + self.MIN_SPEED
 
         dt = 1.0 / self.ctrl_rate
         max_dv = self.MAX_ACCEL * dt
@@ -450,21 +598,24 @@ class PurePursuitNode:
         new_speed = self.previous_speed + speed_diff
         self.previous_speed = new_speed
 
-        if new_speed < 0.05:
-            new_speed = 0.05
+        if abs(new_speed) < 0.05:
+            new_speed = 0.05 if new_speed >= 0 else -0.05
 
         return new_speed, steering
 
-    def lookahead_point(self, rx, ry, yaw):
+    def lookahead_point(self, rx, ry, yaw, l_dist=None):
         if not self.path_points:
             return None
+
+        # Fallback to standard lookahead distance if no override is supplied
+        if l_dist is None:
+            l_dist = self.lookahead_dist
 
         def to_robot(dx, dy, yaw):
             c = math.cos(-yaw)
             s = math.sin(-yaw)
             return (c * dx - s * dy, s * dx + c * dy)
 
-        # closest path index, searching only forward from the cursor
         start = max(0, self.closest_i)
         end = min(len(self.path_points), start + self.max_search_ahead)
         best_i, best_d2 = start, float('inf')
@@ -475,21 +626,18 @@ class PurePursuitNode:
                 best_d2, best_i = d2, i
         self.closest_i = best_i
 
-        # walk forward by arc length until we pass the lookahead distance
         dist_acc = 0.0
         lastx, lasty = self.path_points[best_i]
         for j in range(best_i + 1, len(self.path_points)):
             x, y = self.path_points[j]
             dist_acc += math.hypot(x - lastx, y - lasty)
             lastx, lasty = x, y
-            if dist_acc >= self.lookahead_dist:
+            if dist_acc >= l_dist:
                 dx, dy = x - rx, y - ry
                 xr, _ = to_robot(dx, dy, yaw)
-                if xr > 0.0:            # point is in front of the robot
+                if xr > 0.0:
                     return (x, y)
-                # behind us — keep walking forward
 
-        # fallback: nearest future non-behind point
         for k in (10, 20, 30, 40, 60, 80):
             fb = min(best_i + k, len(self.path_points) - 1)
             xfb, yfb = self.path_points[fb]
@@ -499,7 +647,6 @@ class PurePursuitNode:
                 return (xfb, yfb)
         return self.path_points[-1]
 
-    # ---- Steering while reversing ----
     def reverse_steering(self):
         """Guided reverse: negated pure-pursuit toward the upcoming path direction.
 
@@ -511,47 +658,22 @@ class PurePursuitNode:
                                               RIGHT → robot effectively turns right
         So to back away AND rotate the nose toward a target on the left (where
         the path continues), we need NEGATIVE wheel angle.
-
-        The result: during REVERSE, the robot simultaneously backs away from
-        the obstacle and rotates to face the upcoming path direction. When
-        FORWARD resumes, heading error is already reduced — fewer PP
-        corrections and less overshoot.
-
-        WHY NOT THE OLD APPROACH (lookahead_point with flipped yaw):
-        The original code called lookahead_point(x, y, yaw + π). That function
-        walks path_points FORWARD from closest_i and only accepts candidates
-        "in front of" the queried heading. With heading flipped by π, nothing
-        on the forward path qualifies, so it fell through all fallbacks and
-        returned path_points[-1] — the end of the entire coverage route. The
-        resulting alpha was large and arbitrary, saturating steering to
-        MAX_STEERING every time. With Ackermann, max-angle reverse just
-        retraces the mirrored forward arc, yielding near-zero net displacement.
-
-        NOTE: this uses self.closest_i as the look-ahead base. When called
-        after path_skip_on_timeout has advanced closest_i, the target
-        automatically points toward the skipped-ahead section of the path —
-        exactly where we want the robot to go after it recovers.
         """
         if not self.current_pose or not self.path_points:
             return 0.0
 
         x, y, yaw = self.current_pose
 
-        # Look 20 steps (4m) ahead from closest_i: stable heading target
-        # that's far enough to be meaningful but not in a different lane.
         target_i = min(self.closest_i + 20, len(self.path_points) - 1)
         tx, ty = self.path_points[target_i]
 
         dx, dy = tx - x, ty - y
         if math.hypot(dx, dy) < 0.1:
-            return 0.0   # target coincides with robot — no meaningful angle
+            return 0.0
 
         alpha = self.wrap_pi(math.atan2(dy, dx) - yaw)
-
-        # Standard PP formula for forward motion…
         steer_fwd = math.atan2(2.0 * self.wheelbase * math.sin(alpha),
                                self.lookahead_dist)
-        # …negated for Ackermann reverse kinematics.
         steer_rev = -steer_fwd
 
         return max(self.MIN_STEERING, min(self.MAX_STEERING, steer_rev))

@@ -1,0 +1,62 @@
+{
+  "bag_file": "sim_run_20260731_084010.bag",
+  "bag_path": "/home/hakurokun/hakuroukun-zemi/src/hakuroukun_boustrophedon_with_cones/scripts/evaluation/sim_run_20260731_084010.bag",
+  "evaluated_at": "2026-07-31T18:19:30",
+  "params": {
+    "cleaning_width_m": 1.0,
+    "stall_threshold_mps": 0.02,
+    "stall_min_duration_s": 3.0
+  },
+  "run": {
+    "t_start_epoch": 2.37,
+    "t_end_epoch": 1049.740000001,
+    "duration_s": 1047.370000001,
+    "duration_min": 17.456166666683334,
+    "path_length_m": 218.13163660280722,
+    "mean_speed_when_moving_mps": 0.27833394745611123,
+    "fraction_time_moving_pct": 86.14514409936578,
+    "n_odom_samples": 94762,
+    "planned_source": "/planned_path",
+    "n_planned_points": 985
+  },
+  "coverage": {
+    "coverage_pct": 75.00533864243705,
+    "coverage_pct_raw": 56.903071180457154,
+    "cleaned_area_m2": 175.69250523604455,
+    "total_valid_area_m2": 234.24,
+    "total_valid_area_m2_raw": 308.7575092016906,
+    "valid_area_source": "bcd_inflated",
+    "restricted_violations": 0,
+    "restricted_violations_pct": 0.0,
+    "bcd_valid_area_m2": 234.24
+  },
+  "trajectory_error": {
+    "savg_m": 0.14565839246762965,
+    "smax_m": 1.2586535581066123,
+    "rms_m": 0.24131404912726667,
+    "n_planned_over_1m_off": 8,
+    "pct_planned_over_1m_off": 0.8121827411167513
+  },
+  "stalls": {
+    "count": 9,
+    "total_stall_time_s": 123.81400000000001,
+    "pct_of_run_stalled": 11.82141936468314
+  },
+  "gear": {
+    "n_samples": 0
+  },
+  "gps": {
+    "n_samples": 41895,
+    "cov_xx_min": 0.0001,
+    "cov_xx_median": 0.0001,
+    "cov_xx_max": 0.0001,
+    "cov_xx_mean": 0.00010000000000000002,
+    "max_dt_s": 0.039000000000100954,
+    "n_gaps_over_2s": 0,
+    "n_cov_over_1e-2": 0,
+    "n_cov_over_1": 0,
+    "status_hist": {
+      "0": 41895
+    }
+  }
+}

@@ -1,0 +1,79 @@
+<launch>
+  <!-- Arguments -->
+  <arg name="scan_topic"  default="/scan_multi" />
+  <arg name="base_frame"  default="base_link" />
+  <arg name="odom_frame"  default="odom" />
+  <arg name="map_frame"   default="map" />
+  <arg name="use_rviz"    default="true" />
+
+  <!-- Bridges Gazebo /ground_truth/odometry to a real odom->base_link TF.
+       Required by gmapping; without this, the TF tree has no odom frame
+       and gmapping can't associate scans to pose. -->
+  <node pkg="hakuroukun_boustrophedon_with_cones"
+        type="odom_tf_broadcaster.py"
+        name="odom_tf_broadcaster"
+        output="screen">
+    <param name="odom_frame" value="$(arg odom_frame)"/>
+    <param name="base_frame" value="$(arg base_frame)"/>
+    <param name="odom_topic" value="/ground_truth/odometry"/>
+  </node>
+
+  <!-- Gmapping SLAM Node -->
+  <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen">
+    <remap from="scan" to="$(arg scan_topic)"/>
+
+    <param name="base_frame" value="$(arg base_frame)"/>
+    <param name="odom_frame" value="$(arg odom_frame)"/>
+    <param name="map_frame"  value="$(arg map_frame)"/>
+
+    <param name="map_update_interval" value="2.0"/>
+    <param name="maxUrange" value="12.0"/>
+    <param name="maxRange" value="15.0"/>
+    <param name="sigma" value="0.05"/>
+    <param name="kernelSize" value="1"/>
+    <param name="lstep" value="0.05"/>
+    <param name="astep" value="0.05"/>
+    <param name="iterations" value="5"/>
+    <param name="lsigma" value="0.075"/>
+    <param name="ogain" value="3.0"/>
+    <param name="lskip" value="0"/>
+
+    <!-- Sim odometry from Gazebo /ground_truth/odometry is essentially
+         perfect. Tell gmapping to trust it and NOT try to override with
+         scan-match corrections. This is the fix for the wavy walls seen
+         with default noise params. For a real robot, raise these back
+         to ~0.1 each. -->
+    <param name="srr" value="0.01"/>
+    <param name="srt" value="0.01"/>
+    <param name="str" value="0.01"/>
+    <param name="stt" value="0.01"/>
+
+    <!-- Only accept scan matches with a decent score. Rejects the weak
+         matches that were creating wall artifacts. -->
+    <param name="minimumScore" value="200.0"/>
+
+    <!-- Less frequent updates lets scans settle before committing to the
+         map. Was 0.1/0.1 (too aggressive for sim). -->
+    <param name="linearUpdate" value="0.2"/>
+    <param name="angularUpdate" value="0.2"/>
+
+    <param name="temporalUpdate" value="1.0"/>
+    <param name="resampleThreshold" value="0.5"/>
+    <param name="particles" value="30"/>
+    <param name="delta" value="0.05"/>
+
+    <!-- Widened from ±20 to cover the warehouse extent (world x∈[-25,30],
+         y∈[-3,44]). Grid still auto-expands past these bounds if needed. -->
+    <param name="xmin" value="-30.0"/>
+    <param name="ymin" value="-10.0"/>
+    <param name="xmax" value="35.0"/>
+    <param name="ymax" value="50.0"/>
+  </node>
+
+  <!-- Launch RViz with configured layout -->
+  <group if="$(arg use_rviz)">
+    <node pkg="rviz" type="rviz" name="rviz"
+          args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/mapping.rviz"
+          required="true"/>
+  </group>
+</launch>

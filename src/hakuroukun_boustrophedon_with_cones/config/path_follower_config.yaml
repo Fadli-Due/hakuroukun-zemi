@@ -12,11 +12,15 @@ pure_pursuit_hakuroukun:
   # 40 steps x 0.20m = 8m skip — clears a stuck corner turn.
   skip_on_timeout: 15
   obstacle_stop_range: 0.70
+  hold_corridor_half_width: 0.55   # NEW — half-width of front collision corridor, m
+  hold_corridor_max_range:  3.0    # NEW — ignore returns beyond this for HOLD, m
+  hold_front_offset:        0.0 
 
 reverse:
   enable: true
-  speed: 0.18
-  max_duration: 2.5       # was 1.2 — backs up ~0.45m instead of 0.22m
+  speed: 0.35
+  min_dwell: 2
+  max_duration: 5.0       # was 1.2 — backs up ~0.45m instead of 0.22m
   front_stop_range: 1.50
   front_clear_range: 1.0  # was 2.50 — static walls never reach 2.5m clearance
   front_fov_deg: 70
@@ -25,3 +29,4 @@ reverse:
   progress_min: 0.04
   cooldown: 3.0
   max_hold_time: 15.0     # exposed here for easy tuning (was code-only default)
+  fwd_only_grace_time: 15.0 

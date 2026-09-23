@@ -33,11 +33,31 @@
         <remap from="scan" to="/scan_multi"/>
     </node>
 
+
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="odom_tf_broadcaster.py"
+          name="odom_tf_broadcaster"
+          output="screen">
+        <param name="odom_frame" value="odom"/>
+        <param name="base_frame" value="base_link"/>
+        <param name="odom_topic" value="/ground_truth/odometry"/>
+    </node>
+    
     <!-- Offline Boustrophedon Planner (publishes /planned_path, latched) -->
     <node pkg="hakuroukun_boustrophedon_with_cones"
           type="offline_coverage_planner.py"
           name="offline_coverage_planner"
-          output="screen" />
+          output="screen">
+        <!-- SIM ONLY: hakuroukun_pose/rear_wheel_odometry in sim comes from a
+             simulated-GPS pipeline whose hardcoded rotation_angle (172.1deg,
+             calibrated for the real outdoor site) does not apply to Gazebo's
+             GPS reference frame, so it disagrees badly with the robot's actual
+             position on the map. Use Gazebo's noise-free ground-truth pose
+             (already in the map frame) instead. Do NOT carry this remap over
+             to offline_path_planning_real.launch. -->
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+        <param name="skip_init_gate" value="true"/>
+    </node>
 
     <!-- Online obstacle-avoidance layer: subscribes /planned_path + /scan_multi,
          publishes /desired_path with detours spliced in around persistent
@@ -45,7 +65,10 @@
     <node pkg="hakuroukun_boustrophedon_with_cones"
           type="local_replanner.py"
           name="local_replanner"
-          output="screen" />
+          output="screen">
+        <!-- SIM ONLY: see note above -->
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+    </node>
 
     <!-- Return-to-start: waits for /path_follower/done, computes an A* path
          from the robot's end-of-coverage pose to baseline[0], publishes it on
@@ -55,7 +78,10 @@
     <node pkg="hakuroukun_boustrophedon_with_cones"
           type="return_to_start.py"
           name="return_to_start"
-          output="screen" />
+          output="screen">
+        <!-- SIM ONLY: see note above -->
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+    </node>
 
     <!-- Path Follower (tracks /desired_path) -->
     <node pkg="hakuroukun_boustrophedon_with_cones"
@@ -63,11 +89,27 @@
           name="path_follower"
           output="screen">
         <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+        <!-- SIM ONLY: see note above -->
+        <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+        <!-- SIM ONLY: bypass the 2D Pose Estimate init handshake (2026-07-06).
+             The real robot gates path_follower on /map_odom_calibrator/initialized,
+             which flips True only after clicking 2D Pose Estimate in RViz. In sim
+             AMCL owns the map frame directly — there is no calibrator to click,
+             so path_follower would hang forever without this bypass.
+             Do NOT set this in offline_path_planning_real.launch. -->
+        <param name="skip_init_gate" value="true"/>
     </node>
 
     <!-- RViz -->
     <group if="$(arg open_rviz)">
         <node pkg="rviz" type="rviz" name="rviz" required="true"
-              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/boustrophedon_with_cones.rviz"/>
+              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/boustrophedon_with_cones.rviz">
+            <!-- SIM ONLY: the "odom" Odometry display in boustrophedon_with_cones.rviz
+                 is hardcoded to /hakuroukun_pose/rear_wheel_odometry, which is shared
+                 with the real-robot config. Remap it here (sim-only) rather than
+                 editing the shared .rviz file, since /ground_truth/odometry doesn't
+                 exist on the real robot. -->
+            <remap from="/hakuroukun_pose/rear_wheel_odometry" to="/ground_truth/odometry"/>
+        </node>
     </group>
 </launch>

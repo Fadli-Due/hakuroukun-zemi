@@ -20,7 +20,7 @@
 
     <!-- Arguments -->
     <arg name="open_rviz"   default="true"/>
-    <arg name="map_file"    default="$(find hakuroukun_boustrophedon_with_cones)/maps/conemap_planning.yaml"/>
+    <arg name="map_file"    default="$(find hakuroukun_boustrophedon_with_cones)/maps/df_area_outline_rotated.yaml"/>
 
     <!-- Optional initial map->odom offset. Rarely needed: usually you start
          with identity and calibrate in RViz via "2D Pose Estimate". -->
@@ -75,7 +75,7 @@
           type="path_follower.py"
           name="path_follower"
           output="screen">
-        <remap from="cmd_controller" to="/hakuroukun_steering_controller/cmd_controller"/>
+        
     </node>
 
     <!-- Return-to-Start: waits for /path_follower/done, then A*-routes

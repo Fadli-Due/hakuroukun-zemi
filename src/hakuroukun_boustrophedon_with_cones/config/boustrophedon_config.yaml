@@ -15,7 +15,7 @@ robot_radius: 1.0
 # --- coverage pattern --------------------------------------------------------
 # Distance between adjacent sweep lanes (m). Set equal to the cleaning width
 # for edge-to-edge coverage. Smaller -> more overlap, higher coverage, slower.
-lane_spacing: 1.0
+lane_spacing: 1.3
 
 # Trim each lane end by this much (m) to leave room for the 180-deg turn.
 # BCD lane ends sit on obstacle boundaries, so trimming costs little real

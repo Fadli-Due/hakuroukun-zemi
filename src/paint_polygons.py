@@ -6,7 +6,7 @@ Interactive polygon painter for ROS occupancy-grid PGM maps.
  
 Use this to convert a Gmapping output (walls + cone-dots) into a planning
 map where restricted areas formed by cones are painted as solid occupied
-polygons -- matching the semantic intent of Nguyen Cong Tai's TASP
+polygons -- matching the semantic intent of Nguyen Van Tai's TASP
 restricted-area approach.
  
 Usage:

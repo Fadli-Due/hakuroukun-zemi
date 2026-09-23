@@ -1,0 +1,33 @@
+<launch>
+    <!-- D-F sim mapping. Uses Gazebo's /ground_truth/odometry directly,
+         bypassing the simulated-GPS pipeline (same approach as
+         offline_path_planning_conemap.launch). -->
+
+    <arg name="open_rviz" default="true"/>
+
+    <!-- Broadcast odom -> base_link using Gazebo ground truth -->
+    <node pkg="hakuroukun_boustrophedon_with_cones"
+          type="odom_tf_broadcaster.py"
+          name="odom_tf_broadcaster"
+          output="screen">
+        <param name="odom_frame" value="odom"/>
+        <param name="base_frame" value="base_link"/>
+        <param name="odom_topic" value="/ground_truth/odometry"/>
+    </node>
+
+    <!-- Static TF publisher to connect the robot body to the merged laser scanner -->
+    <node pkg="tf2_ros" type="static_transform_publisher" name="base_link_to_laser_link" 
+          args="0.0 0.0 0.0 0.0 0.0 0.0 base_link laser_link" />
+
+    <rosparam file="$(find hakuroukun_boustrophedon_with_cones)/config/gmapping_params.yaml"
+              command="load" />
+
+    <node pkg="gmapping" type="slam_gmapping" name="slam_gmapping" output="screen" required="true">
+        <remap from="scan" to="/scan_multi"/>
+    </node>
+
+    <group if="$(arg open_rviz)">
+        <node pkg="rviz" type="rviz" name="rviz_mapping" required="false"
+              args="-d $(find hakuroukun_boustrophedon_with_cones)/rviz/mapping.rviz"/>
+    </group>
+</launch>
